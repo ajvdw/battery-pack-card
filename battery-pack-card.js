@@ -133,6 +133,8 @@ const TEMPLATES = {
       chg:      ["binary_sensor", "status_charging"],
       dch:      ["binary_sensor", "status_discharging"],
       balAct:   ["binary_sensor", "status_balancing"],
+      heat:     ["binary_sensor", "status_heating"],
+      heatA:    ["sensor", "heating_current"],        // optional, enable it in the YAML
       tMos:     ["sensor", "temperature_powertube"],
       t1:       ["sensor", "temperature_sensor_1"],
       t2:       ["sensor", "temperature_sensor_2"],
@@ -186,6 +188,7 @@ const ADVANCED_SECTIONS = [
       { name: "entity_current",          selector: ENT_SENSOR },
       { name: "entity_power",            selector: ENT_SENSOR },
       { name: "entity_balance_current",  selector: ENT_SENSOR },
+      { name: "entity_heating_current",  selector: ENT_SENSOR },
       { name: "entity_cycles",           selector: ENT_SENSOR },
       { name: "entity_capacity_remaining", selector: ENT_SENSOR },
       { name: "entity_capacity_total",   selector: ENT_SENSOR },
@@ -372,6 +375,7 @@ const LABELS = {
   entity_current: "Pack current",
   entity_power: "Pack power",
   entity_balance_current: "Balance current",
+  entity_heating_current: "Heating current",
   entity_cycles: "Cycle count",
   entity_capacity_remaining: "Capacity remaining (Ah)",
   entity_capacity_total: "Capacity total (Ah)",
@@ -1692,7 +1696,7 @@ class BatteryPackCard extends HTMLElement {
       energyTotal: has(E.capTot) ? this._capacity(E.capTot).kwh : null,
       nominalVoltage: this._nominalV(),
       deltaMv, deltaState, temp,
-      alarm: has(E.alarmB) ? this._on(E.alarmB) : (this._tpl() && (has(E.alarmN) || has(E.alarmS)) ? this._tplAlarm(E) : null),
+      alarm: has(E.alarmB) ? this._on(E.alarmB) : (this._tmpl() && (has(E.alarmN) || has(E.alarmS)) ? this._tmplAlarm(E) : null),
       alarmText: has(E.alarmS) ? this._state(E.alarmS) : null,
       charge: has(E.chg) ? this._on(E.chg) : null,
       discharge: has(E.dch) ? this._on(E.dch) : null,
@@ -1833,7 +1837,7 @@ class BatteryPackCard extends HTMLElement {
   _on(eid)    { return /^(on|true)$/i.test(String(this._state(eid))); }
   // Templated packs: an alarm is active when the count says so or the error
   // text says something other than "no error".
-  _tplAlarm(E) {
+  _tmplAlarm(E) {
     if (this._num(E.alarmN) > 0) return true;
     const s = String(this._state(E.alarmS) ?? "").trim().toLowerCase();
     return !["", "normal", "ok", "none", "no alarm", "no error", "no errors", "off", "0"].includes(s);
@@ -1905,7 +1909,7 @@ class BatteryPackCard extends HTMLElement {
   }
 
   // The template this card uses (see TEMPLATES), if any.
-  _tpl() { return TEMPLATES[orNull(this._config && this._config.template)] || null; }
+  _tmpl() { return TEMPLATES[orNull(this._config && this._config.template)] || null; }
 
   // The BMS_BLE battery this card shows, if any (see bleEntities).
   _ble() { return orNull(this._config && this._config.bms_ble_device); }
@@ -1914,7 +1918,7 @@ class BatteryPackCard extends HTMLElement {
   // as many as it reports.
   _cells() {
     if (this._ble() && !this._cellsSet) return bleCellCount(this._hass, this._ble()) || this._config.cells;
-    if (this._tpl() && !this._cellsSet) return templateCellCount(this._hass, this._config.template, this._config.prefix) || this._config.cells;
+    if (this._tmpl() && !this._cellsSet) return templateCellCount(this._hass, this._config.template, this._config.prefix) || this._config.cells;
     return this._config.cells;
   }
 
@@ -1940,6 +1944,7 @@ class BatteryPackCard extends HTMLElement {
       curA:     pick(c.entity_current,            B.curA),
       powW:     pick(c.entity_power,              B.powW),
       balA:     pick(c.entity_balance_current,    null),
+      heatA:    pick(c.entity_heating_current,    null),
       cycles:   pick(c.entity_cycles,             B.cycles),
       capRem:   pick(c.entity_capacity_remaining, B.capRem),
       capTot:   pick(c.entity_capacity_total,     B.capTot),
@@ -1974,7 +1979,7 @@ class BatteryPackCard extends HTMLElement {
     const v = this._state(eid);
     const n = parseFloat(v);
     if (!Number.isFinite(n) || isTpl(eid)) return v || "";
-    const u = String(this._hass?.states[eid]?.attributes?.unit_of_measurement || (this._tpl() && this._tpl().runtimeUnit) || "h");
+    const u = String(this._hass?.states[eid]?.attributes?.unit_of_measurement || (this._tmpl() && this._tmpl().runtimeUnit) || "h");
     const min = Math.round(n * ({ s: 1 / 60, min: 1, h: 60, d: 1440 }[u] || 60));
     if (min < 0) return "—";
     const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
@@ -1984,7 +1989,7 @@ class BatteryPackCard extends HTMLElement {
   // A templated pack's entities (see TEMPLATES), with the same keys as below.
   // Every entity_* setting still overrides; what the template has no entity
   // for stays null, so that tile, pill or line is simply not shown.
-  _tplResolve(T) {
+  _tmplResolve(T) {
     const c = this._config, p = c.prefix;
     const d = (k) => { const m = T.entities[k]; return p && m ? `${m[0]}.${p}_${m[1]}` : null; };
     return {
@@ -2013,6 +2018,7 @@ class BatteryPackCard extends HTMLElement {
       balAct:   pick(c.entity_balance_active,     d("balAct")),
       balAllow: pick(c.entity_switch_balance,     d("balAllow")),
       heat:     pick(c.entity_heating,            d("heat")),
+      heatA:    pick(c.entity_heating_current,    d("heatA")),
       dry1:     pick(c.entity_dry1,               d("dry1")),
       dry2:     pick(c.entity_dry2,               d("dry2")),
       tMos:     pick(c.entity_temp_mos,           d("tMos")),
@@ -2027,8 +2033,8 @@ class BatteryPackCard extends HTMLElement {
   _resolveEntities() {
     const c = this._config;
     if (this._ble()) return this._bleResolve();
-    const T = this._tpl();
-    if (T) return this._tplResolve(T);
+    const T = this._tmpl();
+    if (T) return this._tmplResolve(T);
     const p = c.prefix;
     const ap = this._alarmBase();
     const def = (suf, dom = "sensor") => (p ? `${dom}.${p}_${suf}` : null);
@@ -2040,6 +2046,7 @@ class BatteryPackCard extends HTMLElement {
       curA:     pick(c.entity_current,         def("courant_total")),
       powW:     pick(c.entity_power,           def("puissance_totale")),
       balA:     pick(c.entity_balance_current, def("balance_courant")),
+      heatA:    pick(c.entity_heating_current, null),
       cycles:   pick(c.entity_cycles,          def("nombre_cycle")),
       capRem:   pick(c.entity_capacity_remaining, def("capacite_restante_ah")),
       capTot:   pick(c.entity_capacity_total,     def("capacite_batterie_ah")),
@@ -2097,7 +2104,7 @@ class BatteryPackCard extends HTMLElement {
         .replace(/\{(n+)\}/g, (_m, digits) => String(n).padStart(digits.length, "0"));
     }
     // 3. the template's cell naming
-    const T = this._tpl();
+    const T = this._tmpl();
     if (T && c.prefix && T.cell[kind === "v" ? "v" : "r"]) {
       const f = T.cell[kind === "v" ? "v" : "r"];
       return `sensor.${c.prefix}_${f.replace(/\{(n+)\}/g, (_m, d) => String(n).padStart(d.length, "0"))}`;
@@ -2125,10 +2132,11 @@ class BatteryPackCard extends HTMLElement {
     const powRaw= this._exists(E.powW) ? this._watts(E.powW) * this._sign() : this._num(E.packV) * curA;
     const powW  = Number.isFinite(powRaw) ? powRaw : 0;
     const balA  = this._num(E.balA);
+    const heatA = this._num(E.heatA);
     // A whole number: ESPHome reports 12.0 where the add-on reports 12.
     const cyclesRaw = this._state(E.cycles), cyclesN = parseFloat(cyclesRaw);
     const cycles= Number.isFinite(cyclesN) ? String(Math.round(cyclesN)) : (cyclesRaw || "0");
-    const runtime= this._ble() || this._tpl() ? this._bleRuntime(E.runtime) : this._state(E.runtime) || "";
+    const runtime= this._ble() || this._tmpl() ? this._bleRuntime(E.runtime) : this._state(E.runtime) || "";
     // Voltage units are read off the data (see MV_CUTOFF); the configured
     // units only apply until a reading is available.
     const cellRaw = [];
@@ -2179,10 +2187,10 @@ class BatteryPackCard extends HTMLElement {
     const phase = this._state(E.phase) || "—";
     // A templated pack may have no on/off alarm sensor, only an error text
     // and / or a count of active alarms.
-    const alarmActive = this._on(E.alarmB) || (!!this._tpl() && this._tplAlarm(E));
+    const alarmActive = this._on(E.alarmB) || (!!this._tmpl() && this._tmplAlarm(E));
     // BMS_BLE has a problem sensor but no alarm text.
     const alarm = this._state(E.alarmS) || (this._ble() && this._exists(E.alarmB) ? (alarmActive ? "Problem" : "Normal")
-      : this._tpl() && this._exists(E.alarmS) ? "Normal" : "—");
+      : this._tmpl() && this._exists(E.alarmS) ? "Normal" : "—");
     const chgOn  = this._on(E.chg);
     const dchOn  = this._on(E.dch);
     const balAct = this._on(E.balAct);
@@ -2240,6 +2248,7 @@ class BatteryPackCard extends HTMLElement {
       has(E.powW) || (has(E.packV) && has(E.curA))
                     ? this._stat("POWER",   `${fmt(powW, 0)} W`,  powerColor, powerDir.toUpperCase(), has(E.powW) ? E.powW : E.curA) : "",
       has(E.balA)   ? this._stat("BALANCE", `${fmt(balA, 2)} A`,  "var(--clr-purple)", null, E.balA) : "",
+      has(E.heatA)  ? this._stat("HEATING", `${fmt(heatA, 2)} A`, "var(--clr-orange)", null, E.heatA) : "",
       has(E.cycles) ? this._stat("CYCLES",  cycles, "var(--clr-cyan)", null, E.cycles) : "",
       has(E.phase)  ? this._stat("PHASE",   phase,  "var(--clr-grey)", null, E.phase) : "",
     ].join("");
