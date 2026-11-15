@@ -61,13 +61,14 @@ The cell count is read from the `cell count real` sensor, so an 8S pack on a 16-
 | Capacity | `battery capacity remaining` / `battery capacity setting` |
 | Cycles / runtime | `charging cycles` / `battery total runtime` (seconds, shown as `1d 2h`) |
 | Balance current | `balancing current` |
+| Heating current (optional) | `heating current`, shown as a HEATING tile. Uncomment `heating_current` in your ESPHome YAML to get it |
 | Cell summary | `cell average voltage`, `cell voltage min/max`, `cell delta voltage`, `cell voltage min/max cell number` |
 | Cells | `cell voltage 01…` / `cell resistance 01…` |
-| Pills | `status charging`, `status discharging`, `status balancing` |
+| Pills | `status charging`, `status discharging`, `status balancing`, `status heating` (Heater) |
 | Alarm | `bms errors` (text) and `battery total alarms active` (count) |
 | Temperatures | MOS = `temperature powertube`, probes 1–4 = `temperature sensor 1–4` |
 
-Not in the ESPHome example, so not shown unless you set an `entity_*` override: charge phase, heater, DRY1/DRY2, ambient temperature, balancer-enabled. Check the sign of `battery current`: if charging shows as discharging, set `invert_current: true`.
+Not in the ESPHome example, so not shown unless you set an `entity_*` override: charge phase, DRY1/DRY2, ambient temperature, balancer-enabled. Check the sign of `battery current`: if charging shows as discharging, set `invert_current: true`.
 
 ## Install
 
