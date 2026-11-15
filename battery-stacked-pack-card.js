@@ -1,555 +1,115 @@
 /**
- * battery-pack-card — visual battery card for Home Assistant
+ * battery-stacked-pack-card — many battery packs at a glance, drawn as their
+ * cases stacked in a cabinet. Tapping a pack opens the full battery-pack-card
+ * for it, under its row or in a popup.
  *
- * Basic config (prefix-driven, all entities derived):
- *   type: custom:battery-pack-card
- *   prefix: bms_master
- *   alarm_prefix: bms_master_bms_master
- *   cells: 16
+ *   type: custom:battery-stacked-pack-card
+ *   name: Battery Bank
+ *   packs:                       # each entry takes the battery-pack-card options
+ *     - name: Pack 1
+ *       prefix: jk_pack1
+ *     - name: Pack 2
+ *       prefix: jk_pack2
+ *   pack_defaults:               # optional, merged under every pack
+ *     cells: 16
  *
- * ESPHome jk_rs485_bms (ajvdw/esphome-jk-bms): add `template: esphome_jk_rs485`
- * and set `prefix` to the ESPHome device name (BMS-rechts → bms_rechts).
- *
- * Advanced config: override any individual entity ID via `entity_*` keys
- * (any field left blank falls back to the prefix-derived default).
- * For cells use a pattern with {n}, e.g.
- *   cell_voltage_pattern: sensor.foo_cell_{n}_voltage
- *
- * Click any element to open the matching entity's more-info dialog.
+ * Loaded by battery-pack-card.js (HACS registers only that file); it relies on
+ * that card for entity resolution and for the detail view.
  */
 
+(() => {
 const VERSION = "2.0.0-alpha.1";
+if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
-  name: "",
-  prefix: "",
-  // Which entity naming the prefix refers to. "" = the JK-BMS RS485 add-on;
-  // see TEMPLATES for the others (e.g. "esphome_jk_rs485").
-  template: "",
-  alarm_prefix: "",
-  cells: 16,
-  show_battery: true,
-  show_stats: true,
-  show_pills: true,
-  show_cells: true,
-  // The resistance line in each cell tile. It's hidden anyway when there are
-  // no resistance sensors (e.g. a Seplos BMS), unless show_missing is on.
-  show_cell_resistance: true,
-  show_summary: true,
-  show_temperatures: true,
-  cell_voltage_from: "V",
-  summary_voltage_from: "",      // "" = same as cell_voltage_from
-  cell_voltage_decimals: 3,
-  cell_resistance_from: "ohm",
-  cell_resistance_decimals: 0,
-  cells_min_width: 48,
-  cells_max_columns: 8,
-  cell_font_size: 0,        // 0 = auto: 12px at >=96 cells, 13 at >=64, else 14
-  cell_temp_pattern: "",   // sensor per temperature group, {g}/{gg}
-  cell_temp_group_size: 5,  // how many cells share one temperature sensor
-  // "auto" shows temperatures as Home Assistant reports them; "C" / "F"
-  // converts. The colours always follow the real temperature either way.
-  temperature_unit: "auto",
-  // Temperature colour bands, in the unit the card shows (blank = 5 / 35 /
-  // 50 °C, or the same in °F): blue below cold, amber from warm, red from hot.
-  temp_cold: "",
-  temp_warm: "",
-  temp_hot: "",
-  // The MOSFET may run far hotter than the cells, so it has a tile but doesn't
-  // count as the pack's temperature (stacked card, alerts) unless this is on.
-  temp_include_mos: false,
-  // Cell tint bands, in mV of deviation from the pack average. Packs differ in
-  // how much spread is normal, so these are configurable rather than fixed.
-  cell_dev_soft: 2,
-  cell_dev_warn: 5,
-  cell_dev_bad: 10,
-  // Summary Δ (max − min) bands, in mV.
-  delta_warn: 5,
-  delta_bad: 15,
-  // Lowest cell red / highest green by default. On: the reverse, for people
-  // who watch for the top cell running into overvoltage while charging.
-  max_cell_red: false,
-  // Free-form label/value rows per pack behind a "More info" button. Stored in
-  // HA (2025.12+), keyed by info_key, else the prefix, SOC entity or name.
-  show_info: true,
-  // Tiles, pills and lines for sensors that don't exist are hidden. On: show
-  // them anyway (as 0, OFF or —), the way the card worked before 1.8.
-  show_missing: false,
-  info_key: "",
-  // Capacity as charge (Ah) or as energy (kWh = Ah × nominal voltage). The
-  // nominal voltage defaults to cells × 3.2 V, LiFePO4's nominal cell voltage.
-  capacity_unit: "Ah",
+  name: "Battery Bank",
+  layout: "grid",        // "grid" = cabinet with up to `columns` per row, "stack" = one column
+  columns: 4,
+  box_min_width: 130,    // px; rows hold fewer boxes before one gets narrower than this
+  detail: "inline",      // "inline" = opens under the pack's row, "popup" = dialog
+  highlight_soc: true,   // red border on the lowest SOC pack, green on the highest
+  show_legend: true,
+  show_bank_display: true,   // the JK-style display on top of the cabinet
+  bank_display_size: "full", // "full", or "compact": one slim line
+  capacity_unit: "Ah",       // "Ah" or "kWh", for the display and, unless set there, the packs
+  power_unit: "kW",          // the display's power: "kW" (2 decimals), "W" (whole watts), or "auto": W below 1 kW
+  // Bank totals for that display, each an entity or a template. Whatever is
+  // left blank is worked out from the packs where that makes sense.
+  entity_soc: "",
+  entity_voltage: "",
+  entity_current: "",
+  entity_power: "",
+  entity_capacity_remaining: "",
+  entity_capacity_total: "",
+  // For kWh from a bank entity in Ah. Blank: the packs' mean nominal voltage,
+  // or without packs the bank voltage.
   nominal_voltage: "",
-  // The card takes positive current as charging. Some BMSes (or the way they
-  // reach HA) report it the other way round: this flips current and power.
-  invert_current: false,
-  // One switch per status pill. A pill whose entity doesn't exist is hidden
-  // regardless, so a BMS without a heater shows no Heater pill.
-  show_pill_charge: true,
-  show_pill_discharge: true,
-  show_pill_balance: true,
-  show_pill_heater: true,
-  show_pill_dry1: true,
-  show_pill_dry2: true,
+  invert_current: false,     // BMS reports charging as negative: flip current and power (packs and bank)
+  temp_include_mos: false,   // count the MOSFET in each pack's temperature and the temperature alert
+  pack_defaults: {},
+  packs: [],
 };
 
-// LiFePO4 nominal cell voltage, for kWh when no nominal_voltage is set.
-const NOMINAL_CELL_V = 3.2;
-
-// ─── Templates ──────────────────────────────────────────────────────────────
-// A template says how one family of BMS integrations names its entities, so
-// `prefix` plus `template` is all a card needs. Every entity_* setting, the
-// cell patterns and the per-cell overrides still win over a template.
-//   entities: card field -> [domain, suffix]; the id is <domain>.<prefix>_<suffix>.
-//             A field the integration doesn't have is left out (and stays hidden).
-//   cell:     {nn} / {n} are the cell number, zero-padded to the number of n's.
-//   cellCount: sensor suffix holding the real number of cells, if there is one.
-//   runtimeUnit: unit of the runtime sensor when HA reports none.
-const TEMPLATES = {
-  // ESPHome jk_rs485_bms (ajvdw/esphome-jk-bms), one ESPHome sub-device per
-  // BMS. A device called "BMS-rechts" gives sensor.bms_rechts_cell_voltage_01
-  // and so on: prefix: bms_rechts.
-  esphome_jk_rs485: {
-    label: "ESPHome JK-BMS RS485 (ajvdw/esphome-jk-bms)",
-    entities: {
-      soc:      ["sensor", "battery_capacity_state_of_charge"],
-      soh:      ["sensor", "battery_soh_valuation"],
-      packV:    ["sensor", "battery_voltage"],
-      curA:     ["sensor", "battery_current"],
-      powW:     ["sensor", "battery_power"],
-      balA:     ["sensor", "balancing_current"],
-      cycles:   ["sensor", "charging_cycles"],
-      capRem:   ["sensor", "battery_capacity_remaining"],
-      capTot:   ["sensor", "battery_capacity_setting"],
-      runtime:  ["sensor", "battery_total_runtime"],
-      vAvg:     ["sensor", "cell_average_voltage"],
-      vMin:     ["sensor", "cell_voltage_min"],
-      vMax:     ["sensor", "cell_voltage_max"],
-      vDelta:   ["sensor", "cell_delta_voltage"],
-      minCell:  ["sensor", "cell_voltage_min_cell_number"],
-      maxCell:  ["sensor", "cell_voltage_max_cell_number"],
-      phase:    ["sensor", "bms_charging_status"],         // text sensor
-      alarmS:   ["sensor", "bms_errors"],                  // text sensor
-      alarmN:   ["sensor", "battery_total_alarms_active"], // a count, not on/off
-      chg:      ["binary_sensor", "status_charging"],
-      dch:      ["binary_sensor", "status_discharging"],
-      balAct:   ["binary_sensor", "status_balancing"],
-      heat:     ["binary_sensor", "status_heating"],
-      heatA:    ["sensor", "heating_current"],        // optional, enable it in the YAML
-      tMos:     ["sensor", "temperature_powertube"],
-      t1:       ["sensor", "temperature_sensor_1"],
-      t2:       ["sensor", "temperature_sensor_2"],
-      t3:       ["sensor", "temperature_sensor_3"],
-      t4:       ["sensor", "temperature_sensor_4"],
-    },
-    cell: { v: "cell_voltage_{nn}", r: "cell_resistance_{nn}" },
-    cellCount: "cell_count_real",
-    runtimeUnit: "s",
-  },
-};
-const BASIC_SCHEMA = [
-  { name: "name", selector: { text: {} } },
-  { name: "prefix", selector: { text: {} } },
-  { name: "template", selector: { select: { mode: "dropdown", options: [
-    { value: "jkbms_addon", label: "JK-BMS RS485 add-on (default)" },
-    ...Object.entries(TEMPLATES).map(([value, t]) => ({ value, label: t.label })),
-  ] } } },
-  { name: "alarm_prefix", selector: { text: {} } },
-  { name: "cells", selector: { number: { min: 4, max: 512, step: 1, mode: "box" } } },
-  {
-    type: "grid",
-    name: "",
-    schema: [
-      { name: "show_battery",      selector: { boolean: {} } },
-      { name: "show_stats",        selector: { boolean: {} } },
-      { name: "show_pills",        selector: { boolean: {} } },
-      { name: "show_cells",        selector: { boolean: {} } },
-      { name: "show_cell_resistance", selector: { boolean: {} } },
-      { name: "show_summary",      selector: { boolean: {} } },
-      { name: "show_temperatures", selector: { boolean: {} } },
-      { name: "show_info",         selector: { boolean: {} } },
-      { name: "show_missing",      selector: { boolean: {} } },
-    ],
-  },
+// [config key, label, short label, default unit, decimals, signed], in the
+// order of the TOTALS editor fields.
+const TOTALS = [
+  ["entity_soc",                "SOC",       "SOC", "%",  0, false],
+  ["entity_voltage",            "VOLTAGE",   "V",   "V",  2, false],
+  ["entity_current",            "CURRENT",   "A",   "A",  1, true],
+  ["entity_capacity_remaining", "REMAINING", "Ah",  "Ah", 0, false],
+  ["entity_power",              "POWER",     "W",   "W",  0, true],
+  ["entity_capacity_total",     "CAPACITY",  "Cap", "Ah", 0, false],
 ];
 
-const ENT_SENSOR = { entity: { domain: "sensor" } };
-const ENT_BIN    = { entity: { domain: "binary_sensor" } };
-// Threshold fields are all "a number of millivolts", so they share one selector.
-const MV_BAND    = { number: { min: 0, max: 500, step: 0.5, mode: "box" } };
-const TEMP_BAND  = { number: { min: -60, max: 250, step: 0.5, mode: "box" } };
-
-const ADVANCED_SECTIONS = [
-  {
-    title: "Pack metrics",
-    schema: [
-      { name: "entity_soc",              selector: ENT_SENSOR },
-      { name: "entity_soh",              selector: ENT_SENSOR },
-      { name: "entity_pack_voltage",     selector: ENT_SENSOR },
-      { name: "entity_current",          selector: ENT_SENSOR },
-      { name: "entity_power",            selector: ENT_SENSOR },
-      { name: "entity_balance_current",  selector: ENT_SENSOR },
-      { name: "entity_heating_current",  selector: ENT_SENSOR },
-      { name: "entity_cycles",           selector: ENT_SENSOR },
-      { name: "entity_capacity_remaining", selector: ENT_SENSOR },
-      { name: "entity_capacity_total",   selector: ENT_SENSOR },
-      { name: "entity_runtime",          selector: ENT_SENSOR },
-      { name: "entity_charge_phase",     selector: ENT_SENSOR },
-    ],
-  },
-  {
-    title: "Cell summary",
-    schema: [
-      { name: "entity_cell_voltage_avg",   selector: ENT_SENSOR },
-      { name: "entity_cell_voltage_min",   selector: ENT_SENSOR },
-      { name: "entity_cell_voltage_max",   selector: ENT_SENSOR },
-      { name: "entity_cell_voltage_delta", selector: ENT_SENSOR },
-      { name: "entity_cell_min_number",    selector: ENT_SENSOR },
-      { name: "entity_cell_max_number",    selector: ENT_SENSOR },
-    ],
-  },
-  {
-    title: "Status",
-    schema: [
-      { name: "entity_alarm_status",    selector: ENT_SENSOR },
-      { name: "entity_alarm_active",    selector: ENT_BIN },
-      { name: "entity_switch_charge",   selector: ENT_BIN },
-      { name: "entity_switch_discharge",selector: ENT_BIN },
-      { name: "entity_switch_balance",  selector: ENT_BIN },
-      { name: "entity_balance_active",  selector: ENT_BIN },
-      { name: "entity_heating",         selector: ENT_BIN },
-      { name: "entity_dry1",            selector: ENT_BIN },
-      { name: "entity_dry2",            selector: ENT_BIN },
-    ],
-  },
-  {
-    title: "Temperatures",
-    // On a JK BMS the third battery temperature (register 0xF8) is the MOS
-    // sensor again; the JK app leaves it out and shows T1, T2, T4 and T5.
-    hint: "JK BMS: battery temperature 3 is the same sensor as the MOS temperature. If your integration has five battery temperatures, use 1, 2, 4 and 5 for probes 1–4.",
-    schema: [
-      { name: "entity_temp_mos",     selector: ENT_SENSOR },
-      { name: "entity_temp_probe_1", selector: ENT_SENSOR },
-      { name: "entity_temp_probe_2", selector: ENT_SENSOR },
-      { name: "entity_temp_probe_3", selector: ENT_SENSOR },
-      { name: "entity_temp_probe_4", selector: ENT_SENSOR },
-      { name: "entity_temp_ambient", selector: ENT_SENSOR },
-    ],
-  },
-  {
-    title: "Cells (use {n} or {nn} placeholder for cell index 1..N)",
-    schema: [
-      { name: "cell_voltage_pattern",    selector: { text: {} } },
-      { name: "cell_resistance_pattern", selector: { text: {} } },
-    ],
-  },
-  {
-    title: "Display",
-    schema: [
-      {
-        type: "grid",
-        name: "",
-        schema: [
-          {
-            name: "cell_voltage_from",
-            selector: { select: { options: [
-              { value: "V",  label: "V (volts)" },
-              { value: "mV", label: "mV (millivolts)" },
-            ], mode: "dropdown" } },
-          },
-          {
-            name: "summary_voltage_from",
-            selector: { select: { options: [
-              { value: "V",  label: "V (volts)" },
-              { value: "mV", label: "mV (millivolts)" },
-            ], mode: "dropdown" } },
-          },
-          { name: "cell_voltage_decimals", selector: { number: { min: 0, max: 6, step: 1, mode: "box" } } },
-          {
-            name: "cell_resistance_from",
-            selector: { select: { options: [
-              { value: "ohm",  label: "Ω (ohms)" },
-              { value: "mohm", label: "mΩ (milliohms)" },
-            ], mode: "dropdown" } },
-          },
-          { name: "cell_resistance_decimals", selector: { number: { min: 0, max: 4, step: 1, mode: "box" } } },
-          { name: "cells_min_width",   selector: { number: { min: 30, max: 200, step: 1, mode: "box" } } },
-          { name: "cells_max_columns", selector: { number: { min: 1, max: 32, step: 1, mode: "box" } } },
-          { name: "cell_font_size", selector: { number: { min: 0, max: 24, step: 1, mode: "box" } } },
-          { name: "cell_temp_pattern", selector: { text: {} } },
-          { name: "cell_temp_group_size", selector: { number: { min: 1, max: 64, step: 1, mode: "box" } } },
-          {
-            name: "temperature_unit",
-            selector: { select: { options: [
-              { value: "auto", label: "As Home Assistant reports it" },
-              { value: "C",    label: "°C (Celsius)" },
-              { value: "F",    label: "°F (Fahrenheit)" },
-            ], mode: "dropdown" } },
-          },
-          {
-            name: "capacity_unit",
-            selector: { select: { options: [
-              { value: "Ah",  label: "Ah (charge)" },
-              { value: "kWh", label: "kWh (energy)" },
-            ], mode: "dropdown" } },
-          },
-          { name: "nominal_voltage", selector: { number: { min: 1, max: 1000, step: 0.1, mode: "box", unit_of_measurement: "V" } } },
-          { name: "invert_current", selector: { boolean: {} } },
-        ],
-      },
-    ],
-  },
-  {
-    title: "Status pills",
-    schema: [
-      {
-        type: "grid",
-        name: "",
-        schema: [
-          { name: "show_pill_charge",    selector: { boolean: {} } },
-          { name: "show_pill_discharge", selector: { boolean: {} } },
-          { name: "show_pill_balance",   selector: { boolean: {} } },
-          { name: "show_pill_heater",    selector: { boolean: {} } },
-          { name: "show_pill_dry1",      selector: { boolean: {} } },
-          { name: "show_pill_dry2",      selector: { boolean: {} } },
-        ],
-      },
-    ],
-  },
-  {
-    title: "Cell colouring (mV of deviation from the pack average)",
-    schema: [
-      {
-        type: "grid",
-        name: "",
-        schema: [
-          { name: "cell_dev_soft", selector: MV_BAND },
-          { name: "cell_dev_warn", selector: MV_BAND },
-          { name: "cell_dev_bad",  selector: MV_BAND },
-          { name: "delta_warn",    selector: MV_BAND },
-          { name: "delta_bad",     selector: MV_BAND },
-        ],
-      },
-      { name: "max_cell_red", selector: { boolean: {} } },
-    ],
-  },
-  {
-    title: "Temperature colours (in the unit the card shows)",
-    schema: [
-      {
-        type: "grid",
-        name: "",
-        schema: [
-          { name: "temp_cold", selector: TEMP_BAND },
-          { name: "temp_warm", selector: TEMP_BAND },
-          { name: "temp_hot",  selector: TEMP_BAND },
-        ],
-      },
-      { name: "temp_include_mos", selector: { boolean: {} } },
-    ],
-  },
-  {
-    title: "Pack info (Home Assistant 2025.12 or newer)",
-    schema: [
-      { name: "info_key", selector: { text: {} } },
-    ],
-  },
+// More display values, mainly for display-only cards (no packs to work them
+// out from): [config key, entity domain for the picker, or null for any].
+// Set on a card with packs, they take priority like the totals above.
+const EXTRAS = [
+  ["entity_cell_max", "sensor"],
+  ["entity_cell_min", "sensor"],
+  ["entity_temperature", "sensor"],
+  ["entity_alarm", null],
+  ["entity_pack_count", "sensor"],
+  ["entity_charge", null],
+  ["entity_discharge", null],
 ];
-
-const LABELS = {
-  name: "Card title",
-  prefix: "Entity prefix (optional, supplies defaults)",
-  bms_ble_device: "Or a BMS_BLE battery (Bluetooth), instead of a prefix",
-  template: "Entity naming of the prefix (which BMS integration)",
-  alarm_prefix: "Alarm prefix (default: <prefix>_<prefix>), add-on only",
-  cells: "Cell count",
-  show_battery: "Battery icon",
-  show_stats: "Stats grid",
-  show_pills: "Status pills",
-  show_cells: "Cell array",
-  show_cell_resistance: "Cell resistance",
-  show_summary: "Min/Max summary",
-  show_temperatures: "Temperatures",
-  entity_soc: "State of charge",
-  entity_soh: "State of health",
-  entity_pack_voltage: "Pack voltage",
-  entity_current: "Pack current",
-  entity_power: "Pack power",
-  entity_balance_current: "Balance current",
-  entity_heating_current: "Heating current",
-  entity_cycles: "Cycle count",
-  entity_capacity_remaining: "Capacity remaining (Ah)",
-  entity_capacity_total: "Capacity total (Ah)",
-  entity_runtime: "Runtime",
-  entity_charge_phase: "Charge phase",
-  entity_cell_voltage_avg: "Cell voltage average",
-  entity_cell_voltage_min: "Cell voltage min value",
-  entity_cell_voltage_max: "Cell voltage max value",
-  entity_cell_voltage_delta: "Cell voltage delta",
-  entity_cell_min_number: "Lowest cell number",
-  entity_cell_max_number: "Highest cell number",
-  entity_alarm_status: "Alarm status text",
-  entity_alarm_active: "Alarm active flag",
-  entity_switch_charge: "Charge MOSFET",
-  entity_switch_discharge: "Discharge MOSFET",
-  entity_switch_balance: "Balancer enabled",
-  entity_balance_active: "Balancer active now",
-  entity_heating: "Heater on",
-  entity_dry1: "DRY1 contact (relay 1)",
-  entity_dry2: "DRY2 contact (relay 2)",
-  entity_temp_mos: "MOSFET temperature",
-  entity_temp_probe_1: "Probe 1 temperature",
-  entity_temp_probe_2: "Probe 2 temperature",
-  entity_temp_probe_3: "Probe 3 temperature",
-  entity_temp_probe_4: "Probe 4 temperature",
-  entity_temp_ambient: "Ambient temperature",
-  cell_voltage_pattern: "Cell voltage pattern (uses {n} or {nn}; may be a template)",
-  cell_resistance_pattern: "Cell resistance pattern (uses {n} or {nn}; may be a template)",
-  cell_voltage_from: "Cell voltage source unit",
-  summary_voltage_from: "Min/avg/max/Δ source unit (blank = same as cells)",
-  cell_voltage_decimals: "Cell voltage decimals",
-  cell_resistance_from: "Cell resistance source unit",
-  cell_resistance_decimals: "Cell resistance decimals (mΩ)",
-  cells_min_width: "Cell tile min width (px)",
-  cells_max_columns: "Cell grid max columns",
-  cell_font_size: "Cell voltage font size (px, 0 = auto)",
-  cell_temp_pattern: "Cell temperature pattern (uses {g} or {gg})",
-  cell_temp_group_size: "Cells per temperature sensor",
-  temperature_unit: "Temperature unit",
-  capacity_unit: "Capacity shown in",
-  nominal_voltage: "Nominal pack voltage for kWh (blank = cells × 3.2 V)",
-  invert_current: "Invert current and power (BMS reports charging as negative)",
-  show_pill_charge: "Charge",
-  show_pill_discharge: "Discharge",
-  show_pill_balance: "Balance",
-  show_pill_heater: "Heater",
-  show_pill_dry1: "DRY1",
-  show_pill_dry2: "DRY2",
-  temp_cold: "Blue below (default 5 °C / 41 °F)",
-  temp_warm: "Amber from (default 35 °C / 95 °F)",
-  temp_hot: "Red from (default 50 °C / 122 °F)",
-  temp_include_mos: "Count the MOSFET in the pack's temperature and the temperature alert",
-  cell_dev_soft: "Yellow above (mV)",
-  cell_dev_warn: "Orange above (mV)",
-  cell_dev_bad: "Red above (mV)",
-  delta_warn: "Summary Δ amber at (mV)",
-  delta_bad: "Summary Δ red at (mV)",
-  max_cell_red: "Highest cell in red, lowest in green",
-  show_info: "Pack info (More info button)",
-  show_missing: "Also show sensors that don't exist",
-  info_key: "Pack info key (blank = prefix, SOC entity or card title)",
+// A state read as on / off: on, true, a non-zero number, or (for alarms) any
+// text other than an all-clear like "Normal".
+const isOn = (state, alarm = false) => {
+  const v = String(state ?? "").trim().toLowerCase();
+  if (/^(on|true|yes|problem|alarm|warning)$/.test(v)) return true;
+  if (/^(off|false|no|ok|normal|none|no alarm|unavailable|unknown|)$/.test(v)) return false;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n > 0 : alarm;
 };
 
-const fmt = (n, d = 0) => {
+const fmt = (n, d = 0, signed = false) => {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return Number(n).toLocaleString(undefined, {
-    minimumFractionDigits: d,
-    maximumFractionDigits: d,
-  });
+  const s = Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  return signed && n > 0 ? `+${s}` : s;
 };
-
-const orNull = (v) => (typeof v === "string" && v.trim() ? v : null);
-const pick   = (override, fallback) => orNull(override) || fallback || null;
-
-// Source-unit → volts scale factor. Accepts "V" / "mV" (case-insensitive).
-const voltScale = (s) => (String(s || "V").toLowerCase() === "mv" ? 0.001 : 1);
-// A lithium cell sits between roughly 1.5 V and 5 V, so a reading in the
-// thousands can only be millivolts — the two ranges never overlap. That makes
-// the unit recoverable from the readings themselves, which matters because
-// `cell_voltage_from` is easy to leave wrong: the *display* can be patched with
-// `cell_voltage_decimals` while the cell tint stays 1000× off (issues #5, #8).
-const MV_CUTOFF = 100;
-// Source-unit → ohms scale factor. Accepts "ohm" / "mohm" / "Ω" / "mΩ".
-const ohmScale = (s) => {
-  const k = String(s || "ohm").toLowerCase();
-  return (k === "mohm" || k === "mω") ? 0.001 : 1;
-};
-const intOr = (v, d) => {
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) && n >= 0 ? n : d;
-};
-const numOr = (v, d) => {
-  const n = parseFloat(v);
-  return Number.isFinite(n) && n >= 0 ? n : d;
-};
-const numOrAny = (v, d) => {   // like numOr, but negatives allowed (temperatures)
-  const n = parseFloat(v);
-  return Number.isFinite(n) ? n : d;
-};
-
-// Cell tint bands in mV from the pack average. Sorted ascending so a
-// mis-ordered config (red below yellow) still yields usable bands instead of
-// a tint that never fires.
-const devBands = (cfg) => {
-  const [soft, warn, bad] = [
-    numOr(cfg.cell_dev_soft, DEFAULTS.cell_dev_soft),
-    numOr(cfg.cell_dev_warn, DEFAULTS.cell_dev_warn),
-    numOr(cfg.cell_dev_bad,  DEFAULTS.cell_dev_bad),
-  ].sort((a, b) => a - b);
-  return { soft, warn, bad };
-};
-
-// Summary Δ bands, same ordering guarantee.
-const deltaBands = (cfg) => {
-  const [warn, bad] = [
-    numOr(cfg.delta_warn, DEFAULTS.delta_warn),
-    numOr(cfg.delta_bad,  DEFAULTS.delta_bad),
-  ].sort((a, b) => a - b);
-  return { warn, bad };
-};
-
-// Bring `el`'s children in line with `next`'s, reusing nodes wherever the tag
-// matches. Swapping the whole tree (innerHTML) destroys the tile under the
-// cursor; its replacement only picks up :hover on the browser's next hit-test,
-// so every render flashed the hovered tile for a frame (issue #9).
-const patchChildren = (el, next) => {
-  const have = [...el.childNodes], want = [...next.childNodes];
-  want.forEach((w, i) => {
-    const h = have[i];
-    if (!h) return el.appendChild(w);
-    if (h.nodeType !== w.nodeType || h.nodeName !== w.nodeName) return el.replaceChild(w, h);
-    if (h.nodeType !== 1) {
-      if (h.nodeValue !== w.nodeValue) h.nodeValue = w.nodeValue;
-      return;
-    }
-    for (const { name } of [...h.attributes]) if (!w.hasAttribute(name)) h.removeAttribute(name);
-    for (const { name, value } of [...w.attributes]) if (h.getAttribute(name) !== value) h.setAttribute(name, value);
-    patchChildren(h, w);
-  });
-  for (let i = want.length; i < have.length; i++) have[i].remove();
-};
-
-// Pack info lives in HA's shared frontend store ("system data", HA 2025.12+):
-// every user and device sees the same rows, only admins can write (HA enforces
-// it), and it survives restarts and is part of backups. One key per pack, so
-// editing one pack can never overwrite another.
-const INFO_KEY_PREFIX = "battery_pack_card.info.";
-const infoFields = (v) => (v && Array.isArray(v.fields) ? v.fields : [])
-  .filter((f) => f && typeof f === "object")
-  .map((f, i) => ({ id: String(f.id || `f${i}`), label: String(f.label ?? ""), value: String(f.value ?? "") }));
-const newFieldId = () => `f_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-// Fields may hold Home Assistant templates. They're rendered by HA itself
-// (render_template, available to every user) and re-render live whenever an
-// entity they read changes.
-const TPL_RE = /\{\{|\{%|\{#/;
-const isTpl = (s) => TPL_RE.test(s || "");
-const tplText = (v) => (v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
-// One live render_template subscription per template in the wanted set;
-// anything no longer wanted is unsubscribed. `onChange` runs on every render.
+const fin = (v) => typeof v === "number" && Number.isFinite(v);
+const esc = (s) => (s === null || s === undefined ? "" : String(s).replace(/[&<>"']/g, (c) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+}[c])));
+// Same template rules as the pack card: anything with {{ / {% / {# is a
+// Home Assistant template, rendered live by HA.
+const isTpl = (s) => typeof s === "string" && /\{\{|\{%|\{#/.test(s);
+// One render_template subscription per wanted template; `onChange` runs on
+// every new result.
 class TemplateSubs {
   constructor(onChange) { this.map = new Map(); this.onChange = onChange; }
   get(t) { return this.map.get(t); }
-  clear() { this.sync(null, new Set()); }
   sync(conn, want) {
     for (const [t, e] of this.map) {
-      if (want.has(t)) continue;
+      if (want.has(t) && e.conn === conn) continue;
       e.unsub.then((u) => u && u()).catch(() => {});
       this.map.delete(t);
     }
     if (!conn) return;
     for (const t of want) {
       if (this.map.has(t)) continue;
-      const e = { result: undefined, error: null, entities: [] };
+      const e = { conn, result: undefined, error: null, entities: [] };
       e.unsub = conn.subscribeMessage((ev) => {
         if (ev && "result" in ev) {
           e.result = ev.result; e.error = null;
@@ -562,2329 +122,1079 @@ class TemplateSubs {
     }
   }
 }
-
-// Autocomplete snippets: [name, text to insert, caret steps back from its end, hint]
-const TPL_FUNCS = [
-  ["states", "states('')", 2, "State of an entity"],
-  ["state_attr", "state_attr('', '')", 6, "Attribute of an entity"],
-  ["is_state", "is_state('', '')", 6, "True if an entity has a state"],
-  ["has_value", "has_value('')", 2, "True if an entity is available"],
-  ["state_translated", "state_translated('')", 2, "State in your language"],
-  ["now", "now()", 0, "Current date and time"],
-  ["today_at", "today_at('')", 2, "Today at a time, e.g. '18:00'"],
-  ["relative_time", "relative_time()", 1, "e.g. “3 days” since a datetime"],
-  ["time_since", "time_since()", 1, "Time since a datetime"],
-  ["time_until", "time_until()", 1, "Time until a datetime"],
-  ["as_datetime", "as_datetime()", 1, "Parse into a datetime"],
-  ["as_timestamp", "as_timestamp()", 1, "Datetime to UNIX timestamp"],
-  ["as_local", "as_local()", 1, "Datetime in local time"],
-  ["timedelta", "timedelta(days=)", 1, "A duration, e.g. days=30"],
-  ["area_name", "area_name('')", 2, "Area of an entity or device"],
-  ["iif", "iif(, '', '')", 9, "Inline if: iif(test, yes, no)"],
-];
-const TPL_FILTERS = [
-  ["round", "round(1)", 1, "Round to N decimals"],
-  ["float", "float(0)", 1, "To a number (default if not numeric)"],
-  ["int", "int(0)", 1, "To a whole number"],
-  ["default", "default('')", 2, "Fallback when undefined"],
-  ["timestamp_custom", "timestamp_custom('%d-%m-%Y')", 2, "Format a timestamp"],
-  ["as_datetime", "as_datetime", 0, "Parse into a datetime"],
-  ["as_timestamp", "as_timestamp", 0, "Datetime to UNIX timestamp"],
-  ["relative_time", "relative_time", 0, "e.g. “3 days” since a datetime"],
-  ["replace", "replace('', '')", 6, "Replace text"],
-  ["title", "title", 0, "Title Case"],
-  ["upper", "upper", 0, "UPPER CASE"],
-  ["lower", "lower", 0, "lower case"],
-  ["abs", "abs", 0, "Absolute value"],
-];
-
-// Home Assistant converts temperature sensors to the system's unit (°F on US
-// setups), so a reading's unit has to come from the entity, not be assumed.
-const isFahrenheit = (u) => /^\s*°?\s*F\s*$/i.test(String(u || "")) || u === "℉";
-
-// Packs of the JK-BMS RS485 add-on in this Home Assistant, found by their
-// SOC sensor: the classic naming ("bms_master", "bms_1") and Multi-Pack's
-// pack-aware one ("pack_1_bms_1") alike, in natural order.
-const findPrefixes = (hass) => {
-  const st = (hass && hass.states) || {};
-  return Object.keys(st)
-    .map((id) => /^sensor\.(.+)_soc_pourcentage$/.exec(id))
-    .filter(Boolean).map((m) => m[1])
-    .filter((p) => st[`sensor.${p}_tension_totale_volt`] || st[`sensor.${p}_cell_1_volt`])
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+const intOr = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : d; };
+// The display's SOC ring: the SOC colour over most of the arc, fading into a
+// matching tail colour over the last 40 % of it; full is one solid colour.
+const RING = { green: ["#84fa5c", "#68c8cc"], orange: ["#ff9800", "#ffd54f"], red: ["#ef5350", "#b71c1c"] };
+const ringGradient = (soc) => {
+  const [c, tail] = soc > 50 ? RING.green : soc > 20 ? RING.orange : RING.red;
+  if (soc >= 99) return `conic-gradient(${c} 0 100%)`;
+  return `conic-gradient(${c} 0%, ${c} ${(soc * 0.6).toFixed(1)}%, ${tail} ${soc}%, #1c1c1c ${soc}% 100%)`;
 };
-// Packs of a template's integration in this Home Assistant, found by their
-// SOC sensor and a first cell: [prefix, ...] in natural order.
-const findTemplatePrefixes = (hass, key) => {
-  const T = TEMPLATES[key];
-  if (!T) return [];
-  const st = (hass && hass.states) || {};
-  const soc = T.entities.soc[1], first = T.cell.v.replace(/\{(n+)\}/g, (_m, d) => "1".padStart(d.length, "0"));
-  const re = new RegExp(`^sensor\\.(.+)_${soc}$`);
-  return Object.keys(st)
-    .map((id) => re.exec(id)).filter(Boolean).map((m) => m[1])
-    .filter((p) => st[`sensor.${p}_${first}`])
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-};
-// Number of cells of a template pack: what the BMS says it has, else as many
-// cell voltage sensors as exist (the ESPHome example declares 16 for any pack).
-const templateCellCount = (hass, key, prefix) => {
-  const T = TEMPLATES[key], st = (hass && hass.states) || {};
-  if (!T || !prefix) return 0;
-  if (T.cellCount) {
-    const n = parseInt(st[`sensor.${prefix}_${T.cellCount}`]?.state, 10);
-    if (n > 0) return Math.min(512, n);
-  }
-  let n = 0;
-  while (n < 512 && st[`sensor.${prefix}_${T.cell.v.replace(/\{(n+)\}/g, (_m, d) => String(n + 1).padStart(d.length, "0"))}`]) n++;
-  return n;
-};
+const socColor = (s) => (s > 50 ? "var(--clr-green)" : s > 20 ? "var(--clr-orange)" : "var(--clr-red)");
 
-// A 3-decimal cell voltage is ~36-41px wide; a dense pack's tiles are 48-60px,
-// so the number wraps or spills out. Scale it with the cell count
-// (cell_font_size overrides).
-const cellFontPx = (explicit, n) => {
-  const e = parseInt(explicit, 10);
-  if (e > 0) return e;
-  return n >= 96 ? 12 : n >= 64 ? 13 : 14;
-};
+// Every pack's effective battery-pack-card config.
+const packConfigs = (cfg) => (Array.isArray(cfg.packs) ? cfg.packs : []).map((p, i) => {
+  const c = { capacity_unit: cfg.capacity_unit, invert_current: cfg.invert_current, temp_include_mos: cfg.temp_include_mos, ...(cfg.pack_defaults || {}), ...(p || {}) };
+  if (!c.name) c.name = `Pack ${i + 1}`;
+  delete c.alerts;   // the stacked card owns the alerts
+  return c;
+});
 
-// Number of cells a pack has, from its cell voltage sensors.
-const countCells = (hass, prefix) => {
-  const st = (hass && hass.states) || {};
-  let n = 0;
-  while (n < 512 && st[`sensor.${prefix}_cell_${n + 1}_volt`]) n++;
-  return n;
-};
-// "pack_1_bms_1" → "Pack 1 BMS 1", "bms_master" → "BMS master"
-const prefixName = (p) => String(p).split("_").filter(Boolean)
-  .map((w, i) => (/^bms$/i.test(w) ? "BMS" : i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w)).join(" ");
-
-// ─── BMS_BLE-HA ─────────────────────────────────────────────────────────────
-// Batteries of the BMS_BLE-HA integration (patman15/BMS_BLE-HA), read over
-// Bluetooth. A battery is one Home Assistant device, and only a card with
-// `bms_ble_device` set uses any of this. Its entities are found through the
-// entity registry HA gives the frontend (integration, device, translation
-// key) rather than by entity id, so renamed entities, every BMS_BLE version
-// (the ids changed in 2025 and 2026) and every HA language work alike.
-const BLE_PLATFORM = "bms_ble";
-const bleEntityIds = (hass, dev) => Object.values((hass && hass.entities) || {})
-  .filter((e) => e && e.platform === BLE_PLATFORM && e.device_id === dev && hass.states[e.entity_id])
-  .map((e) => e.entity_id);
-// This HA's BMS_BLE batteries: [{ id, name }], by name.
-const bleDevices = (hass) => {
-  const ids = new Set(Object.values((hass && hass.entities) || {})
-    .filter((e) => e && e.platform === BLE_PLATFORM && e.device_id).map((e) => e.device_id));
-  const dev = (hass && hass.devices) || {};
-  return [...ids].map((id) => ({ id, name: (dev[id] && (dev[id].name_by_user || dev[id].name)) || "BLE battery" }))
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-};
-// A battery's entities by what they are: { soc, packV, curA, …, cells, temp }.
-// `cells` is the sensor carrying the cell_voltages list, `temp` the one with
-// temperature_sensors.
-const bleEntities = (hass, dev) => {
-  const out = {};
-  const byKey = {
-    battery_health: "soh", cycles: "cycles", runtime: "runtime", design_capacity: "capTot", current: "curA",
-    max_cell_voltage: "vMax", min_cell_voltage: "vMin", delta_cell_voltage: "vDelta", delta_voltage: "vDelta",
-    chrg_mosfet: "chg", dischrg_mosfet: "dch", balancer: "balAct", heater: "heat",
-  };
-  const byClass = { battery: "soc", voltage: "packV", current: "curA", power: "powW", energy_storage: "capRem", temperature: "temp" };
-  const reg = (hass && hass.entities) || {};
-  for (const eid of bleEntityIds(hass, dev)) {
-    const tk = reg[eid].translation_key, a = hass.states[eid].attributes || {}, dc = a.device_class;
-    if (eid.startsWith("binary_sensor.")) {
-      if (byKey[tk]) out[byKey[tk]] = out[byKey[tk]] || eid;
-      else if (dc === "problem") out.alarmB = out.alarmB || eid;
-      continue;
-    }
-    if (!eid.startsWith("sensor.")) continue;
-    if (Array.isArray(a.cell_voltages)) { out.cells = out.cells || eid; out.vDelta = out.vDelta || eid; continue; }
-    if (tk && byKey[tk]) { out[byKey[tk]] = out[byKey[tk]] || eid; continue; }
-    if (tk) continue;   // signal strength, link quality, …
-    if (byClass[dc]) out[byClass[dc]] = out[byClass[dc]] || eid;
-  }
-  return out;
-};
-const bleCellCount = (hass, dev) => {
-  const e = bleEntities(hass, dev).cells;
-  const list = e && hass.states[e].attributes.cell_voltages;
-  return Array.isArray(list) ? Math.min(512, list.length) : 0;
-};
-// "sensor.x@cell_voltages[3]": one item of a list attribute, which is how
-// BMS_BLE-HA hands over its cells and temperatures. "@" never occurs in an
-// entity id. The lists are in the integration's own units: V and °C.
-const ATTR_REF = /^([a-z0-9_]+\.[a-z0-9_]+)@([a-z0-9_]+)\[(\d+)\]$/;
-const attrRef = (s) => (typeof s === "string" ? ATTR_REF.exec(s) : null);
-const ATTR_CELSIUS = new Set(["temperature_sensors"]);
-
-// ─── Alerts ─────────────────────────────────────────────────────────────────
-// The card's `alerts:` config becomes Home Assistant automations, one per
-// alert type covering all of the card's packs, which the card keeps in sync:
-// each automation carries a fingerprint of what it was built from, and when
-// an admin opens the dashboard after a change (a pack, entity, threshold or
-// recipient), the affected automations are rewritten. Thresholds left blank
-// follow the card's own settings (Δ and temperature bands).
-
-const ALERT_TYPES = [
-  { id: "delta",        name: "Cell difference" },
-  { id: "cell_voltage", name: "Cell voltage" },
-  { id: "temperature",  name: "Temperature" },
-  { id: "soc",          name: "Low SOC" },
-  { id: "bms_alarm",    name: "BMS alarm" },
-  { id: "switches",     name: "Charge / discharge switched off" },
-];
-const ALERT_DEFAULTS = {
-  enabled: false, notify: [], critical: true, cleared: true,
-  quiet: false, quiet_from: "22:00:00", quiet_to: "07:00:00",
-  delta:        { enabled: true,  manual: false, warn_mv: "", alarm_mv: "", minutes: 5 },
-  cell_voltage: { enabled: true,  manual: false, chemistry: "lfp", high_v: "", low_v: "" },
-  temperature:  { enabled: true,  manual: false, warm: "", hot: "", cold: "" },
-  soc:          { enabled: false, manual: false, warn_pct: 20, alarm_pct: 10 },
-  bms_alarm:    { enabled: true,  manual: false },
-  switches:     { enabled: true,  manual: false },
-};
-// Cell voltage limits per chemistry: [high, low] in V.
-const CHEMISTRY = { lfp: [3.6, 2.9], nmc: [4.15, 3.1], lto: [2.75, 1.9] };
-const alertsConfig = (raw) => {
-  const a = { ...ALERT_DEFAULTS, ...(raw || {}) };
-  for (const t of ALERT_TYPES) a[t.id] = { ...ALERT_DEFAULTS[t.id], ...((raw || {})[t.id] || {}) };
-  a.notify = Array.isArray(a.notify) ? a.notify.filter(Boolean) : a.notify ? [a.notify] : [];
-  return a;
-};
-const slugify = (s) => String(s || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "battery";
-const alertKey = (cfg) => orNull(cfg.alerts && cfg.alerts.key) || slugify(cfg.name || cfg.prefix);
-// A short, stable hash of the automation, so the card can tell whether the
-// one in Home Assistant is still what it would write now.
-const fingerprint = (obj) => {
-  const str = JSON.stringify(obj);
-  let h = 5381;
-  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(36);
-};
-const alertNum = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
-
-// The thresholds an alert type uses, with the card's bands filling blanks.
-const alertThresholds = (a, bands) => {
-  const ch = CHEMISTRY[a.cell_voltage.chemistry] || CHEMISTRY.lfp;
-  return {
-    dw: alertNum(a.delta.warn_mv) ?? bands.dw, da: alertNum(a.delta.alarm_mv) ?? bands.da,
-    minutes: Math.max(0, alertNum(a.delta.minutes) ?? 5),
-    high: alertNum(a.cell_voltage.high_v) ?? ch[0], low: alertNum(a.cell_voltage.low_v) ?? ch[1],
-    tw: alertNum(a.temperature.warm) ?? bands.tw, th: alertNum(a.temperature.hot) ?? bands.th, tc: alertNum(a.temperature.cold) ?? bands.tc,
-    sw: alertNum(a.soc.warn_pct) ?? 20, sa: alertNum(a.soc.alarm_pct) ?? 10,
-  };
-};
-
-// Jinja snippets per pack and alert type. Each sets `v` (a number, a boolean,
-// or none when there's no reading), so a trigger only has to compare it.
-const jNum = (expr) => `((${expr}) | float(none))`;
-const jList = (exprs) => `[${exprs.map(jNum).join(", ")}] | select('number') | list`;
-const alertBlocks = (p) => {
-  const k = (n) => +n.toFixed(6);
-  const B = {};
-  if (p.delta) B.delta = `{% set v = ${jNum(p.delta)} %}{% set v = v * ${k(p.sSc * 1000)} if v is number else none %}`;
-  else if (p.vmin && p.vmax) B.delta = `{% set a = ${jNum(p.vmax)} %}{% set b = ${jNum(p.vmin)} %}{% set v = (a - b) * ${k(p.sSc * 1000)} if a is number and b is number else none %}`;
-  else if (p.cells.length > 1) B.delta = `{% set l = ${jList(p.cells)} | select('gt', 0) | list %}{% set v = ((l | max) - (l | min)) * ${k(p.vSc * 1000)} if l | length > 1 else none %}`;
-  if (p.vmax) B.high = `{% set v = ${jNum(p.vmax)} %}{% set v = v * ${k(p.sSc)} if v is number else none %}`;
-  else if (p.cells.length) B.high = `{% set l = ${jList(p.cells)} | select('gt', 0) | list %}{% set v = (l | max) * ${k(p.vSc)} if l else none %}`;
-  if (p.vmin) B.low = `{% set v = ${jNum(p.vmin)} %}{% set v = v * ${k(p.sSc)} if v is number else none %}`;
-  else if (p.cells.length) B.low = `{% set l = ${jList(p.cells)} | select('gt', 0) | list %}{% set v = (l | min) * ${k(p.vSc)} if l else none %}`;
-  if (p.temps.length) {
-    B.hot = `{% set l = ${jList(p.temps)} %}{% set v = l | max if l else none %}`;
-    B.cold = `{% set l = ${jList(p.temps)} %}{% set v = l | min if l else none %}`;
-  }
-  if (p.soc) B.soc = `{% set v = ${jNum(p.soc)} %}`;
-  // On / off readings are none while unknown or unavailable, like numbers.
-  if (p.alarmB) B.bms = `{% set s = states('${p.alarmB}') %}{% set v = (s == 'on') if s in ['on', 'off'] else none %}`;
-  else if (p.alarmS) B.bms = `{% set s = (states('${p.alarmS}') | lower | trim) %}{% set v = none if s in ['unknown', 'unavailable'] else s not in ['normal', 'ok', 'none', 'no alarm', 'off', '0', ''] %}`;
-  const sw = [p.chg, p.dch].filter(Boolean);
-  if (sw.length) B.sw = `{% set s = [${sw.map((e) => `states('${e}')`).join(", ")}] %}{% set v = ('off' in s) if s | reject('in', ['on', 'off']) | list | length == 0 else none %}`;
-  return B;
-};
-
-// The automation for one alert type, or null when no pack has what it needs.
-// Uses the long-standing trigger / condition / action keys, so it loads on
-// every Home Assistant version the card supports.
-const buildAlert = (type, ctx) => {
-  const { a, key, title, packs, T } = ctx;
-  const unit = { delta: " mV", high: " V", low: " V", hot: "°", cold: "°", soc: " %" };
-  const dec = { delta: 0, high: 3, low: 3, hot: 1, cold: 1, soc: 0 };
-  // [kind, level, test, minutes]. A warning stops where the alarm starts,
-  // so going from one into the other sends one message, not two.
-  const rules = {
-    delta:        [["delta", "warning", `v >= ${T.dw} and v < ${T.da}`, T.minutes], ["delta", "alarm", `v >= ${T.da}`, T.minutes]],
-    cell_voltage: [["high", "alarm", `v > ${T.high}`, 1], ["low", "alarm", `v < ${T.low}`, 1]],
-    temperature:  [["hot", "warning", `v >= ${T.tw} and v < ${T.th}`, 2], ["hot", "alarm", `v >= ${T.th}`, 2], ["cold", "warning", `v <= ${T.tc}`, 5]],
-    soc:          [["soc", "warning", `v <= ${T.sw} and v > ${T.sa}`, 1], ["soc", "alarm", `v <= ${T.sa}`, 1]],
-    bms_alarm:    [["bms", "alarm", "v", 0]],
-    switches:     [["sw", "warning", "v", 1]],
-  }[type];
-  // Back to normal. No reading counts as normal here, so a sensor that drops
-  // out and comes back doesn't send "back to normal" out of nowhere; one
-  // that drops out during an alarm is caught by the value check below.
-  const clears = {
-    delta: [["delta", `v < ${T.dw}`, Math.max(2, T.minutes)]],
-    cell_voltage: [["high", `v <= ${T.high}`, 2], ["low", `v >= ${T.low}`, 2]],
-    temperature: [["hot", `v < ${T.tw}`, 5], ["cold", `v > ${T.tc}`, 5]],
-    soc: [["soc", `v > ${T.sw}`, 2]],
-    bms_alarm: [["bms", "not v", 1]],
-    switches: [["sw", "not v", 1]],
-  }[type];
-  const boolKinds = { bms: 1, sw: 1 };
-  const cond = (test, kind) => (boolKinds[kind] ? `{{ v is sameas true }}` : `{{ v is number and (${test}) }}`);
-  const clearCond = (test, kind) => (boolKinds[kind] ? `{{ v is not sameas true }}` : `{{ v is not number or (${test}) }}`);
-  const trigger = [];
-  const values = [];
-  packs.forEach((p) => {
-    const B = alertBlocks(p);
-    const name = String(p.name || "Pack").replace(/\|/g, "/");
-    for (const [kind, level, test, min] of rules) {
-      if (!B[kind]) continue;
-      trigger.push({ platform: "template", value_template: B[kind] + cond(test, kind), ...(min ? { for: { minutes: min } } : {}), id: `${level}|${name}|${kind}` });
-    }
-    if (a.cleared) for (const [kind, test, min] of clears) {
-      if (!B[kind]) continue;
-      trigger.push({ platform: "template", value_template: B[kind] + clearCond(test, kind), for: { minutes: min }, id: `clear|${name}|${kind}` });
-    }
-    // The reading at the time, for the message: '?' when there is none.
-    for (const kind of new Set(rules.map((r) => r[0]))) {
-      if (!B[kind]) continue;
-      const shown = boolKinds[kind] ? "('yes' if v else 'no') if v is not none else '?'" : `(v | round(${dec[kind]})) if v is number else '?'`;
-      values.push(`{% elif pack == ${JSON.stringify(name)} and kind == '${kind}' %}${B[kind]}{{ ${shown} }}`);
-    }
-  });
-  if (!trigger.length) return null;
-  const tname = ALERT_TYPES.find((t) => t.id === type).name;
-  const what = { delta: "cell difference", high: "highest cell", low: "lowest cell", hot: "temperature", cold: "temperature", soc: "SOC", bms: "BMS alarm", sw: "charge or discharge switched off" };
-  const fixed = { delta: "cell difference back to normal", high: "cell voltages back to normal", low: "cell voltages back to normal", hot: "temperature back to normal", cold: "temperature back to normal", soc: "SOC back to normal", bms: "BMS alarm cleared", sw: "charge and discharge back on" };
-  const valueTpl = values.length ? `{% if false %}${values.join("")}{% endif %}` : "";
-  const units = JSON.stringify(unit).replace(/"/g, "'");
-  const whats = JSON.stringify(what).replace(/"/g, "'");
-  const fixeds = JSON.stringify(fixed).replace(/"/g, "'");
-  const message = `{% set w = ${whats} %}{% set u = ${units} %}{% set f = ${fixeds} %}{{ pack }}: {% if level == 'clear' %}{{ f[kind] }}{% if value not in ['', '?'] and kind not in ['bms', 'sw'] %} ({{ value }}{{ u[kind] }}){% endif %}{% elif kind in ['bms', 'sw'] %}{{ w[kind] }}{% else %}{{ w[kind] }} {{ value }}{{ u[kind] }}{% endif %}`;
-  const titleTpl = `{{ {'warning': '⚠️ Battery warning', 'alarm': '🚨 Battery alarm', 'clear': '✅ Battery OK'}[level] }} · ${title.replace(/[{}]/g, "")}`;
-  const action = [{ variables: {
-    level: "{{ trigger.id.split('|')[0] }}", pack: "{{ trigger.id.split('|')[1] }}", kind: "{{ trigger.id.split('|')[2] }}",
-    value: valueTpl,
-  } }];
-  // A sensor that dropped out isn't "back to normal".
-  if (a.cleared) action.push({ condition: "template", value_template: "{{ level != 'clear' or value != '?' }}" });
-  if (a.quiet) action.push({ condition: "or", conditions: [
-    { condition: "template", value_template: "{{ level != 'warning' }}" },
-    { condition: "time", after: a.quiet_to || "07:00:00", before: a.quiet_from || "22:00:00" },
-  ] });
-  for (const t of a.notify) {
-    if (t === "persistent_notification") {
-      action.push({ service: "persistent_notification.create", data: { title: titleTpl, message, notification_id: `bpc_${key}_${type}_{{ pack | slugify }}` } });
-    } else {
-      const data = { title: titleTpl, message };
-      if (a.critical && /^notify\.mobile_app_/.test(t)) data.data = "{{ {'push': {'interruption-level': 'critical'}, 'ttl': 0, 'priority': 'high', 'channel': 'alarm_stream'} if level == 'alarm' else {} }}";
-      action.push({ service: t, data });
-    }
-  }
-  const auto = {
-    alias: `${title} · ${tname}`,
-    description: `Managed by Battery Pack Card (${title}). Changes made here are overwritten when the card's alerts change; switch on "Let me edit it myself" for this alert in the card to keep your own version.`,
-    mode: "queued", max: 25,
-    trigger, condition: [], action,
-  };
-  auto.variables = { bpc_managed: true, bpc_card: key, bpc_fingerprint: fingerprint(auto) };
-  return auto;
-};
-
-// Every automation the card wants: { type: config | null }.
-const buildAlerts = (cfg, packs) => {
-  const a = alertsConfig(cfg.alerts);
-  const out = {};
-  if (!a.enabled || !a.notify.length) { for (const t of ALERT_TYPES) out[t.id] = null; return out; }
-  const T = alertThresholds(a, packs[0] ? packs[0].bands : { dw: 5, da: 15, tw: 35, th: 50, tc: 5 });
-  const ctx = { a, key: alertKey(cfg), title: cfg.name || "Battery", packs, T };
-  for (const t of ALERT_TYPES) out[t.id] = a[t.id].enabled ? buildAlert(t.id, ctx) : null;
-  return out;
-};
-
-// The alerts as they stand right now, from the cards' own readings, for the
-// bell: { type: { level: "ok" | "warning" | "alarm" | "off" | "manual", where } }.
-const alertStatus = (cfg, sums, bands) => {
-  const a = alertsConfig(cfg.alerts);
-  const T = alertThresholds(a, bands || { dw: 5, da: 15, tw: 35, th: 50, tc: 5 });
-  const out = {};
-  const check = (id, fn) => {
-    if (!a[id].enabled) return (out[id] = { level: "off", where: [] });
-    if (a[id].manual) return (out[id] = { level: "manual", where: [] });
-    const hits = sums.filter(Boolean).map((s) => [s.name, fn(s)]).filter(([, l]) => l);
-    const level = hits.some(([, l]) => l === "alarm") ? "alarm" : hits.length ? "warning" : "ok";
-    out[id] = { level, where: hits.filter(([, l]) => l === level).map(([n]) => n) };
-  };
-  const n = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
-  check("delta", (s) => (n(s.deltaMv) === null ? 0 : s.deltaMv >= T.da ? "alarm" : s.deltaMv >= T.dw ? "warning" : 0));
-  check("cell_voltage", (s) => ((n(s.cellMax) !== null && s.cellMax > T.high) || (n(s.cellMin) !== null && s.cellMin > 0 && s.cellMin < T.low) ? "alarm" : 0));
-  check("temperature", (s) => { const t = s.temp && n(s.temp.shown); return t === null ? 0 : t >= T.th ? "alarm" : t >= T.tw || t <= T.tc ? "warning" : 0; });
-  check("soc", (s) => (n(s.soc) === null ? 0 : s.soc <= T.sa ? "alarm" : s.soc <= T.sw ? "warning" : 0));
-  check("bms_alarm", (s) => (s.alarm ? "alarm" : 0));
-  check("switches", (s) => (s.charge === false || s.discharge === false ? "warning" : 0));
-  return out;
-};
-
-// Write / update / remove the card's automations so Home Assistant matches
-// `want`. Automations switched to "edit it myself" are created once and then
-// left alone; ones not made by the card are never touched.
-const syncAlerts = async (hass, key, want, cfg) => {
-  const a = alertsConfig(cfg.alerts);
-  const get = async (id) => {
-    try { return await hass.callApi("GET", `config/automation/config/${id}`); } catch (e) { return null; }
-  };
-  const done = [];
-  for (const t of ALERT_TYPES) {
-    const id = `bpc_${key}_${t.id}`;
-    const w = want[t.id];
-    const cur = await get(id);
-    const ours = cur && cur.variables && cur.variables.bpc_managed;
-    if (a[t.id].manual) {
-      if (!cur && w) { await hass.callApi("POST", `config/automation/config/${id}`, w); done.push(`created ${id}`); }
-      continue;
-    }
-    if (!w) {
-      if (ours) { await hass.callApi("DELETE", `config/automation/config/${id}`); done.push(`removed ${id}`); }
-      continue;
-    }
-    if (cur && !ours) continue;   // someone else's automation with our id: leave it
-    if (!cur || cur.variables.bpc_fingerprint !== w.variables.bpc_fingerprint) {
-      await hass.callApi("POST", `config/automation/config/${id}`, w);
-      done.push(`${cur ? "updated" : "created"} ${id}`);
-    }
-  }
-  return done;
-};
-
-// Running inside the card editor's preview? Then never write anything.
-const inEditor = (el) => {
-  for (let n = el; n; n = n.parentNode || n.host) {
-    const tag = (n.tagName || "").toLowerCase();
-    if (tag === "hui-card-preview" || tag === "hui-dialog-edit-card" || tag === "hui-card-element-editor") return true;
-  }
-  return false;
-};
-
-// The bell in a card's header and its status popover (shared by both cards).
-const BELL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2m6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1z"/></svg>`;
-const alertsBell = (status, sync, admin) => {
-  const vals = Object.values(status);
-  const alarms = vals.filter((s) => s.level === "alarm").length, warns = vals.filter((s) => s.level === "warning").length;
-  if (!admin && !alarms && !warns) return "";
-  const cls = alarms ? "is-alarm" : warns ? "is-warn" : "";
-  const tip = alarms || warns ? `${alarms + warns} alert${alarms + warns > 1 ? "s" : ""} active` : sync.state === "busy" ? "Updating the alerts…" : "Alerts: all quiet";
-  return `<button type="button" class="bpc-bell ${cls}${sync.state === "busy" ? " syncing" : ""}" data-action="alerts" title="${tip}" aria-label="${tip}">${BELL_SVG}${alarms + warns ? `<span class="badge">${alarms + warns}</span>` : ""}<span class="sync"></span></button>`;
-};
-const alertsPopover = (status, sync, cfg, esc) => {
-  const a = alertsConfig(cfg.alerts);
-  const tag = { ok: ["t-ok", "ok"], warning: ["t-warn", "warning"], alarm: ["t-alarm", "alarm"], off: ["t-off", "off"], manual: ["t-own", "your own"] };
-  const syncTag = sync.state === "busy" ? `<span class="tag t-warn">updating…</span>` : sync.state === "error" ? `<span class="tag t-alarm" title="${esc(sync.error || "")}">not updated</span>` : sync.state === "ok" ? `<span class="tag t-ok">in sync</span>` : "";
-  return `<div class="bpc-pop">
-    <div class="h"><b>Alerts</b>${syncTag}</div>
-    <div class="st">${a.notify.length ? `To ${a.notify.map((t) => esc(t === "persistent_notification" ? "notification in Home Assistant" : t.replace(/^notify\./, ""))).join(", ")}` : "No one to notify yet."}</div>
-    <ul>${ALERT_TYPES.map((t) => { const s = status[t.id] || { level: "off", where: [] }; const [c, l] = tag[s.level]; return `<li><span>${t.name}</span><span class="tag ${c}">${l}${s.where.length && (s.level === "warning" || s.level === "alarm") ? ` · ${esc(s.where.join(", "))}` : ""}</span></li>`; }).join("")}</ul>
-    ${sync.state === "error" ? `<div class="st err">${esc(sync.error || "")}</div>` : ""}
-    <div class="st">Change them in the card's editor, under <i>Alerts</i>.</div>
-  </div>`;
-};
-const ALERTS_CSS = `
-  .bpc-bellwrap { position: relative; display: flex; }
-  .bpc-bell { position: relative; width: 30px; height: 30px; border-radius: 50%; border: 0; background: none; color: var(--secondary-text-color, #8a8a8a); opacity: 0.7; cursor: pointer; display: grid; place-items: center; padding: 0; }
-  .bpc-bell:hover { opacity: 1; background: rgba(127,127,127,0.12); }
-  .bpc-bell svg { width: 18px; height: 18px; flex: none; }
-  .bpc-bell .badge { position: absolute; top: 1px; right: 0; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; color: #111; }
-  .bpc-bell .sync { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--primary-color, #03a9f4); display: none; animation: bpcpulse 1s ease-in-out infinite; }
-  .bpc-bell.syncing .sync { display: block; }
-  .bpc-bell.is-warn { color: var(--clr-amber, #ffc107); opacity: 1; } .bpc-bell.is-warn .badge { background: var(--clr-amber, #ffc107); }
-  .bpc-bell.is-alarm { color: var(--clr-red, #ef5350); opacity: 1; } .bpc-bell.is-alarm .badge { background: var(--clr-red, #ef5350); color: #fff; }
-  @keyframes bpcpulse { 50% { opacity: 0.3; } }
-  .bpc-pop { position: absolute; right: 0; top: 36px; width: 270px; z-index: 5; padding: 10px 12px; border-radius: 12px; text-align: left;
-    background: var(--card-background-color, #262626); color: var(--primary-text-color, #e1e1e1); box-shadow: 0 10px 32px rgba(0,0,0,0.5); border: 1px solid rgba(127,127,127,0.25); font-size: 12.5px; }
-  .bpc-pop .h { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 13px; }
-  .bpc-pop .st { font-size: 11.5px; color: var(--secondary-text-color, #9b9b9b); margin: 4px 0; }
-  .bpc-pop .st.err { color: var(--clr-red, #ef5350); }
-  .bpc-pop ul { list-style: none; margin: 4px 0; padding: 0; }
-  .bpc-pop li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-top: 1px solid rgba(127,127,127,0.18); }
-  .bpc-pop .tag { font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 9px; white-space: nowrap; }
-  .bpc-pop .tag.t-ok { color: #4caf50; background: rgba(76,175,80,0.13); } .bpc-pop .tag.t-warn { color: #ffc107; background: rgba(255,193,7,0.13); }
-  .bpc-pop .tag.t-alarm { color: #ef5350; background: rgba(239,83,80,0.15); } .bpc-pop .tag.t-off { color: #9e9e9e; background: rgba(158,158,158,0.12); }
-  .bpc-pop .tag.t-own { color: #b39ddb; background: rgba(179,157,219,0.12); }
-`;
-
-// One running sync per card at a time; again when what the card wants
-// changes, and every 10 minutes in case an automation was removed by hand.
-class AlertsSync {
-  constructor(onChange) { this.state = { state: "", error: "" }; this.sig = null; this.at = 0; this.busy = false; this.onChange = onChange; }
-  tick(el, hass, cfg, packsFn) {
-    if (!cfg || !cfg.alerts || !hass || !hass.callApi || hass.user?.is_admin !== true || !el.isConnected || inEditor(el)) return;
-    // Every few seconds at most: HA hands over a new hass on any change.
-    const now = Date.now();
-    if (this.busy || (cfg === this.cfg && now - this.checked < 5000)) return;
-    this.cfg = cfg;
-    this.checked = now;
-    const want = buildAlerts(cfg, packsFn());
-    const sig = alertKey(cfg) + JSON.stringify(Object.values(want).map((w) => w && w.variables.bpc_fingerprint)) + JSON.stringify(ALERT_TYPES.map((t) => alertsConfig(cfg.alerts)[t.id].manual));
-    if (sig === this.sig && now - this.at < 600000) return;
-    this.busy = true;
-    this.state = { state: "busy", error: "" };
-    this.onChange();
-    syncAlerts(hass, alertKey(cfg), want, cfg)
-      .then((done) => { this.sig = sig; this.state = { state: "ok", error: "", done }; if (done.length) console.info("BATTERY-PACK-CARD alerts:", done.join(", ")); })
-      .catch((e) => { this.sig = sig; this.state = { state: "error", error: (e && (e.body && e.body.message || e.message)) || "Could not update the automations." }; })
-      .finally(() => { this.busy = false; this.at = Date.now(); this.onChange(); });
-  }
-}
-
-// Everything the stacked card needs from here, as one object.
-const ALERTS_API = { TYPES: ALERT_TYPES, config: alertsConfig, build: buildAlerts, status: alertStatus, sync: syncAlerts, key: alertKey, bell: alertsBell, popover: alertsPopover, css: ALERTS_CSS, Sync: AlertsSync, inEditor };
-
-const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode etc. */ } };
-
-// ─── Main card ─────────────────────────────────────────────────────────────
-class BatteryPackCard extends HTMLElement {
-  static get alerts() { return ALERTS_API; }
+class BatteryStackedPackCard extends HTMLElement {
   static getStubConfig(hass) {
-    // Start from the first pack the JK-BMS add-on has in this Home Assistant
-    // (any naming); the alarm entities are then found by the card itself.
-    const p = findPrefixes(hass)[0];
-    if (p) return { prefix: p, name: prefixName(p), cells: countCells(hass, p) || 16 };
-    for (const key of Object.keys(TEMPLATES)) {
-      const tp = findTemplatePrefixes(hass, key)[0];
-      if (tp) return { prefix: tp, template: key, name: prefixName(tp), cells: templateCellCount(hass, key, tp) || 16 };
-    }
-    const b = bleDevices(hass)[0];
-    if (b) return { name: b.name, bms_ble_device: b.id, cells: bleCellCount(hass, b.id) || 16 };
+    // Start with the JK-BMS add-on packs found in this Home Assistant, if any.
+    const Pack = customElements.get("battery-pack-card");
+    const found = Pack && Pack.findPacks ? Pack.findPacks(hass) : [];
+    if (found.length) return { name: "Battery Bank", packs: found.slice(0, 16) };
     return {
-      prefix: "bms_master",
-      name: "BMS Master",
-      alarm_prefix: "bms_master_bms_master",
-      cells: 16,
+      name: "Battery Bank",
+      packs: [
+        { name: "Pack 1", prefix: "bms_1" },
+        { name: "Pack 2", prefix: "bms_2" },
+      ],
     };
   }
-
-  // For the stacked card and the editors: every add-on pack and BMS_BLE
-  // battery in this HA.
-  static findPacks(hass) {
-    return [
-      ...findPrefixes(hass).map((p) => ({ prefix: p, name: prefixName(p), cells: countCells(hass, p) || 16 })),
-      ...Object.keys(TEMPLATES).flatMap((key) => findTemplatePrefixes(hass, key)
-        .map((p) => ({ prefix: p, template: key, name: prefixName(p), cells: templateCellCount(hass, key, p) || 16 }))),
-      ...bleDevices(hass).map((b) => ({ name: b.name, bms_ble_device: b.id, cells: bleCellCount(hass, b.id) || 16 })),
-    ];
-  }
   static getConfigElement() {
-    return document.createElement("battery-pack-card-editor");
+    return document.createElement("battery-stacked-pack-card-editor");
   }
 
   setConfig(config) {
     if (!config) throw new Error("Configuration required");
-    const merged = { ...DEFAULTS, ...config };
-    if (!merged.name) merged.name = merged.prefix || "Battery";
-    // Without an alarm prefix the add-on's classic naming is assumed
-    // (bms_master → bms_master_bms_master); see _alarmBase for other naming.
-    this._alarmAuto = !!merged.prefix && !orNull(merged.alarm_prefix);
-    if (merged.prefix && !merged.alarm_prefix) {
-      merged.alarm_prefix = `${merged.prefix}_${merged.prefix}`;
+    this._config = { ...DEFAULTS, ...config };
+    this._packCfgs = packConfigs(this._config);
+    if (!this.shadowRoot) this._setup();
+    this._open = -1;
+    this._buildSources();
+    this._buildCabinet();
+    this._syncTemplates();
+    this._queue();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    (this._sources || []).forEach((s) => { s.hass = hass; });
+    if (this._detailCard) this._detailCard.hass = hass;
+    this._syncTemplates();
+    this._queue();
+  }
+
+  // Templated bank totals: subscribed while the card is on screen.
+  _syncTemplates() {
+    this._tpl = this._tpl || new TemplateSubs(() => this._queue());
+    const c = this._config || {}, conn = this._hass && this._hass.connection;
+    const want = new Set(this.isConnected && conn ? [...TOTALS, ...EXTRAS].map(([k]) => c[k]).filter(isTpl) : []);
+    this._tpl.sync(conn, want);
+  }
+
+  connectedCallback() {
+    this._syncTemplates();
+    (this._sources || []).forEach((s) => s.setSummaryLive(true));
+    if (this._cab && !this._ro) {
+      this._ro = new ResizeObserver(() => this._placeDetail());
+      this._ro.observe(this._cab);
     }
-    this._alarmFound = undefined;
-    this._cellsSet = config.cells !== undefined && config.cells !== null && config.cells !== "";
-    this._config = merged;
-    if (!this._root) this._setup();
-    this._syncInfo();
-    this._syncCfgTemplates();
+  }
+
+  disconnectedCallback() {
+    this._syncTemplates();
+    (this._sources || []).forEach((s) => s.setSummaryLive(false));
+    if (this._ro) { this._ro.disconnect(); this._ro = null; }
+  }
+
+  getCardSize() {
+    const n = (this._packCfgs || []).length;
+    const cols = this._config && this._config.layout === "stack" ? 1 : intOr(this._config && this._config.columns, 4);
+    return 2 + Math.ceil(n / cols) * 3 + (this._config && this._config.show_bank_display !== false ? 3 : 0);
+  }
+
+  // One headless battery-pack-card per pack does the entity work; see
+  // BatteryPackCard.summarySource. The pack card may load after this file
+  // when someone registered both as resources, so wait for it.
+  _buildSources() {
+    (this._sources || []).forEach((s) => s.setSummaryLive(false));
+    this._sources = [];
+    const Pack = customElements.get("battery-pack-card");
+    this._incompatible = !!Pack && typeof Pack.summarySource !== "function";
+    if (this._incompatible) return;   // an older copy won the registration; see _renderHead
+    if (!Pack) {
+      if (!this._waiting) {
+        this._waiting = true;
+        customElements.whenDefined("battery-pack-card").then(() => {
+          this._waiting = false;
+          if (this._config) this.setConfig(this._config);
+          if (this._hass) this.hass = this._hass;
+        });
+      }
+      return;
+    }
+    this._sources = this._packCfgs.map((c) => {
+      const s = Pack.summarySource(c, () => this._queue());
+      s.setSummaryLive(this.isConnected);
+      if (this._hass) s.hass = this._hass;
+      return s;
+    });
+  }
+
+  _queue() {
+    if (this._raf) return;
+    this._raf = true;
+    requestAnimationFrame(() => { this._raf = false; this._render(); });
   }
 
   _setup() {
     this.attachShadow({ mode: "open" });
-    const wrap = document.createElement("div");
-    // #info sits outside #body so the per-update render never touches it:
-    // someone typing in the pack info must not have it redrawn under them.
-    wrap.innerHTML = `<style>${this._css()}</style><ha-card><div id="body"></div><div id="info" hidden></div></ha-card>`;
-    this.shadowRoot.appendChild(wrap);
-    this._root = this.shadowRoot.querySelector("#body");
-    this._root.addEventListener("click", (e) => {
+    this.shadowRoot.innerHTML = `
+      <style>${CSS}</style>
+      <ha-card>
+        <div id="head"></div>
+        <div id="rack"><div id="disp" class="mounted" hidden></div><div id="cab" class="cabinet"></div></div>
+        <div id="legend"></div>
+      </ha-card>
+      <dialog id="dlg">
+        <div class="dlg-bar">
+          <span class="nav">
+            <button type="button" data-nav="-1" aria-label="Previous pack">‹ Prev</button>
+            <button type="button" data-nav="1" aria-label="Next pack">Next ›</button>
+          </span>
+          <button type="button" data-nav="close">Close ✕</button>
+        </div>
+        <div id="dlg-body"></div>
+      </dialog>`;
+    const r = this.shadowRoot;
+    this._head = r.getElementById("head");
+    this._cab = r.getElementById("cab");
+    this._legend = r.getElementById("legend");
+    this._rack = r.getElementById("rack");
+    this._disp = r.getElementById("disp");
+    this._disp.addEventListener("click", (e) => {
+      const t = e.composedPath().find((n) => n.dataset && n.dataset.entity);
+      if (t) this._moreInfo(t.dataset.entity);
+    });
+    this._dlg = r.getElementById("dlg");
+
+    this._head.addEventListener("click", (e) => {
       const path = e.composedPath();
-      if (path.some((n) => n.dataset && n.dataset.action === "info")) return this._toggleInfo();
       if (path.some((n) => n.classList && n.classList.contains("bpc-pop"))) return;
-      const bell = path.some((n) => n.dataset && n.dataset.action === "alerts");
-      if (bell || this._alertsOpen) {
-        this._alertsOpen = bell && !this._alertsOpen;
-        this._html = null;
-        this._render();
-        if (bell) return;
+      if (path.some((n) => n.dataset && n.dataset.action === "alerts")) {
+        this._alertsOpen = !this._alertsOpen;
+        this._headHtml = null;
+        return this._render();
       }
-      const el = path.find((n) => n.dataset && n.dataset.entity);
-      if (el && el.dataset.entity) this._moreInfo(el.dataset.entity);
+      const t = path.find((n) => n.dataset && n.dataset.entity);
+      if (t) this._moreInfo(t.dataset.entity);
     });
-    this._infoEl = this.shadowRoot.querySelector("#info");
-    this._infoEl.addEventListener("click", (e) => this._onInfoClick(e));
-    this._infoEl.addEventListener("input", (e) => { this._scheduleInfoSave(); this._onInfoInput(e); });
-    this._infoEl.addEventListener("keyup", (e) => {
-      if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) this._acUpdate(e.composedPath()[0]);
+    // Any other click closes the alerts popover.
+    this.shadowRoot.addEventListener("click", (e) => {
+      if (!this._alertsOpen || e.composedPath().some((n) => n === this._head)) return;
+      this._alertsOpen = false;
+      this._headHtml = null;
+      this._render();
     });
-    this._infoEl.addEventListener("focusout", (e) => {
-      if (!this._ac || e.composedPath()[0] !== this._ac.input) return;
-      setTimeout(() => { if (this._ac && this.shadowRoot.activeElement !== this._ac.input) this._acClose(); }, 0);
+    this._cab.addEventListener("click", (e) => {
+      const path = e.composedPath();
+      const box = path.find((n) => n.classList && n.classList.contains("box"));
+      if (!box) return;
+      const i = Number(box.dataset.i);
+      if (this._config.detail === "popup") this._showPopup(i);
+      else this._toggleInline(i);
     });
-    this._infoEl.addEventListener("keydown", (e) => this._onInfoKey(e));
-    this._infoEl.addEventListener("pointerdown", (e) => this._onInfoPointer(e));
-  }
-
-  connectedCallback() { this._syncInfo(); this._syncCfgTemplates(); }
-
-  disconnectedCallback() {
-    if (this._infoSaveT) this._saveInfo();   // don't lose the last keystrokes
-    this._unsubInfo();
-    this._acClose();
-    this._tplSync(new Set());
-    if (this._cfgTpl) this._cfgTpl.clear();
-    this._cfgTplSig = null;
+    this._dlg.addEventListener("click", (e) => {
+      const nav = e.composedPath().find((n) => n.dataset && n.dataset.nav);
+      if (e.target === this._dlg || (nav && nav.dataset.nav === "close")) return this._dlg.close();
+      if (nav) {
+        const n = this._packCfgs.length;
+        this._showPopup((this._open + Number(nav.dataset.nav) + n) % n);
+      }
+    });
+    this._dlg.addEventListener("close", () => { this._open = -1; this._dropDetail(); this._markOpen(); });
+    // A modal dialog makes everything else inert, Home Assistant's own
+    // more-info dialog included; step aside before HA opens it.
+    this._dlg.addEventListener("hass-more-info", () => this._dlg.close());
+    if (this.isConnected) this.connectedCallback();
   }
 
   _moreInfo(entityId) {
-    if (!entityId) return;
     const ev = new Event("hass-more-info", { bubbles: true, composed: true });
     ev.detail = { entityId };
     this.dispatchEvent(ev);
   }
 
-  set hass(hass) {
-    this._hass = hass;
-    this._syncInfo();
-    this._syncCfgTemplates();
-    this._queueRender();
-  }
-
-  // Coalesce bursts of state-changed events into one render per frame.
-  _queueRender() {
-    if (this._summaryCb) return this._summaryCb();   // headless: the owner renders
-    if (this._rafPending) return;
-    this._rafPending = true;
-    requestAnimationFrame(() => {
-      this._rafPending = false;
-      this._render();
-    });
-  }
-
-  // Every entity setting (incl. per-cell overrides and patterns) that holds a
-  // template gets one render_template subscription while the card is on
-  // screen. Cheap to call on every update: a signature short-circuits it.
-  _syncCfgTemplates() {
-    this._cfgTpl = this._cfgTpl || new TemplateSubs(() => this._queueRender());
-    if (this._config && this._cfgTplFor !== this._config) {   // only changes with the config
-      this._cfgTplFor = this._config;
-      const all = new Set();
-      Object.values(this._resolveEntities()).forEach((v) => { if (typeof v === "string" && isTpl(v)) all.add(v); });
-      for (let n = 1; n <= (this._cells() || 0); n++) {
-        for (const k of ["v", "r", "t"]) { const t = this._cellEntity(k, n); if (isTpl(t)) all.add(t); }
-      }
-      this._cfgTplAll = all;
-    }
-    const conn = this._hass && this._hass.connection;
-    const live = this.isConnected || this._summaryLive;
-    const want = live && conn && this._cfgTplAll ? this._cfgTplAll : new Set();
-    const sig = [...want].sort().join("\u0000");
-    if (sig === this._cfgTplSig && conn === this._cfgTplConn) return;
-    this._cfgTplSig = sig;
-    this._cfgTplConn = conn;
-    this._cfgTpl.sync(conn, want);
-  }
-
-  // ─── Pack info ──────────────────────────────────────────────────────────
-  // State: _infoState "off" | "loading" | "ready" | "unsupported";
-  // _infoFields = last known rows; _infoOpen / _infoEditing = UI mode.
-
-  _infoId() {
-    const c = this._config || {};
-    return orNull(c.info_key) || orNull(c.prefix) || orNull(c.entity_soc) || orNull(c.name);
-  }
-
-  _isAdmin() { return this._hass?.user?.is_admin === true; }
-
-  // Keep exactly one live subscription, for this pack's key, while the card
-  // is on screen. Cheap enough to call from every `hass` update.
-  _syncInfo() {
-    const id = this._infoId(), conn = this._hass?.connection;
-    const want = this.isConnected && this._config?.show_info !== false &&
-      conn && id ? INFO_KEY_PREFIX + id : null;
-    if (want === this._infoKey && conn === this._infoConn) {
-      // Same subscription; only the viewer's rights can have changed (the
-      // Edit button follows them).
-      const admin = this._isAdmin();
-      if (admin !== this._infoAdmin) { this._infoAdmin = admin; if (this._infoState === "ready") this._infoChanged(); }
-      return;
-    }
-    if (this._infoSaveT) this._saveInfo();   // flush under the old key first
-    this._unsubInfo();
-    this._infoKey = want;
-    this._infoConn = conn;
-    this._infoAdmin = this._isAdmin();
-    this._infoFields = [];
-    this._infoEditing = false;
-    this._infoState = want ? "loading" : "off";
-    if (!want) return this._infoChanged();
-    this._infoOpen = lsGet(`battery-pack-card:info-open:${id}`) === "1";
-    const key = want;
-    this._infoSub = this._hass.connection.subscribeMessage(
-      (ev) => { if (this._infoKey === key) this._onInfo(ev && ev.value); },
-      { type: "frontend/subscribe_system_data", key },
-    );
-    this._infoSub.catch(() => {        // HA before 2025.12: unknown command
-      if (this._infoKey !== key) return;
-      this._infoSub = null;
-      this._infoState = "unsupported";
-      this._infoChanged();
-    });
-  }
-
-  _unsubInfo() {
-    const sub = this._infoSub;
-    this._infoSub = null;
-    this._infoKey = null;
-    if (sub) sub.then((unsub) => unsub && unsub()).catch(() => {});
-  }
-
-  _onInfo(value) {
-    this._infoState = "ready";
-    const fields = infoFields(value);
-    // Never rebuild the editor under someone's cursor; pick up the latest
-    // version (usually our own save echoed back) when they press Done.
-    if (this._infoEditing) { this._infoPending = fields; return; }
-    this._infoFields = fields;
-    this._infoChanged();
-  }
-
-  _infoChanged() {
-    if (this._summaryCb) return;
-    if (this._hass && this._config) this._render();   // footer button
-    this._renderInfo();
-  }
-
-  _infoButton() {
-    if (this._infoState !== "ready") return "";
-    if (!this._infoFields.length && !this._isAdmin()) return "";
-    const open = !!this._infoOpen;
-    return `<button class="info-toggle" data-action="info" aria-expanded="${open}">${open ? "Less info ▴" : "More info ▾"}</button>`;
-  }
-
-  _toggleInfo() {
-    this._infoOpen = !this._infoOpen;
-    lsSet(`battery-pack-card:info-open:${this._infoId()}`, this._infoOpen ? "1" : "0");
-    if (!this._infoOpen && this._infoEditing) this._finishInfoEdit();
-    this._infoChanged();
-  }
-
-  _renderInfo() {
-    const el = this._infoEl;
-    if (!el) return;
-    const open = this._infoOpen && this._infoState === "ready";
-    el.hidden = !open;
-    if (!open) { el.innerHTML = ""; this._tplSync(new Set()); return; }
-    if (this._infoEditing) return;    // the editor manages its own DOM
-    const admin = this._isAdmin(), f = this._infoFields;
-    el.innerHTML = `
-      <div class="info-head">
-        <div class="section-label">PACK INFO</div>
-        ${admin ? `<button class="info-btn" data-info="edit">Edit</button>` : ""}
-      </div>
-      ${f.length ? `<dl class="info-list">${f.map((x) => `<dt>${this._tplCell(x.label)}</dt><dd>${this._tplCell(x.value)}</dd>`).join("")}</dl>`
-                 : `<div class="info-empty">No info yet.${admin ? " Use Edit to add fields like BMS, cells or installation date." : ""}</div>`}
-    `;
-    this._tplSync(new Set(f.flatMap((x) => [x.label, x.value]).filter(isTpl)));
-    this._tplPaint();
-  }
-
-  _tplCell(text) {
-    return isTpl(text) ? `<span data-tpl="${this._esc(text)}">…</span>` : this._esc(text);
-  }
-
-  // Pack-info templates: subscribed while on screen (open panel or editor),
-  // released for anything that isn't.
-  _tplSync(want) {
-    this._infoTpl = this._infoTpl || new TemplateSubs(() => this._tplPaint());
-    this._infoTpl.sync(this._hass && this._hass.connection, want);
-  }
-
-  _tplPaint() {
-    if (!this._infoEl) return;
-    for (const el of this._infoEl.querySelectorAll("[data-tpl]")) {
-      const e = this._infoTpl && this._infoTpl.get(el.getAttribute("data-tpl"));
-      const err = e && e.error;
-      // The editor preview gets the full error; the read-only list stays compact.
-      el.textContent = !e || (e.result === undefined && !err) ? "…"
-        : err ? (el.closest(".preview") ? `⚠ ${err}` : "⚠ Template error") : tplText(e.result);
-      el.classList.toggle("tpl-err", !!err);
-      if (err) el.title = err; else el.removeAttribute("title");
-    }
-  }
-
-  _infoRowHtml(f) {
-    return `
-      <div class="info-row" data-id="${this._esc(f.id)}">
-        <button class="drag" data-info="drag" title="Drag to reorder (or focus and use ↑ ↓)" aria-label="Move field">⋮⋮</button>
-        <input class="k" placeholder="Label" aria-label="Label" value="${this._esc(f.label)}" autocomplete="off" spellcheck="false" aria-autocomplete="list">
-        <input class="v" placeholder="Value or {{ template }}" aria-label="Value" value="${this._esc(f.value)}" autocomplete="off" spellcheck="false" aria-autocomplete="list">
-        <button class="del" data-info="del" title="Remove field" aria-label="Remove field">✕</button>
-      </div>`;
-  }
-
-  _startInfoEdit() {
-    if (!this._isAdmin()) return;
-    this._infoEditing = true;
-    this._infoPending = null;
-    const rows = this._infoFields.length ? this._infoFields : [{ id: newFieldId(), label: "", value: "" }];
-    this._infoEl.innerHTML = `
-      <div class="info-head">
-        <div class="section-label">PACK INFO</div>
-        <span class="info-status" aria-live="polite">Changes save automatically</span>
-        <button class="info-btn primary" data-info="done">Done</button>
-      </div>
-      <div class="info-rows">${rows.map((f) => this._infoRowHtml(f)).join("")}</div>
-      <button class="info-btn add" data-info="add">+ Add field</button>
-    `;
-    const first = this._infoEl.querySelector(this._infoFields.length ? ".v" : ".k");
-    if (first) first.focus();
-    this._updatePreviews();
-  }
-
-  _schedulePreviews() {
-    clearTimeout(this._prevT);
-    this._prevT = setTimeout(() => this._updatePreviews(), 350);
-  }
-
-  // Under each row that holds a template: what it renders to right now.
-  _updatePreviews() {
-    if (!this._infoEditing) return;
-    const want = new Set();
-    for (const row of this._infoEl.querySelectorAll(".info-row")) {
-      const parts = [row.querySelector(".k").value, row.querySelector(".v").value].filter(isTpl);
-      let pv = row.querySelector(".preview");
-      if (!parts.length) { if (pv) pv.remove(); continue; }
-      parts.forEach((t) => want.add(t));
-      if (!pv) { pv = document.createElement("div"); pv.className = "preview"; row.appendChild(pv); }
-      pv.innerHTML = parts.map((t) => `<span data-tpl="${this._esc(t)}"></span>`).join(" · ");
-    }
-    this._tplSync(want);
-    this._tplPaint();
-  }
-
-  async _finishInfoEdit() {
-    this._acClose();
-    clearTimeout(this._prevT);
-    if (this._infoSaveT) await this._saveInfo();
-    this._infoEditing = false;
-    if (this._infoPending) { this._infoFields = this._infoPending; this._infoPending = null; }
-    this._infoChanged();
-  }
-
-  _readInfoRows() {
-    return [...this._infoEl.querySelectorAll(".info-row")].map((r) => ({
-      id: r.dataset.id,
-      label: r.querySelector(".k").value.trim(),
-      value: r.querySelector(".v").value.trim(),
-    }));
-  }
-
-  _setInfoStatus(text, isError) {
-    const st = this._infoEl.querySelector(".info-status");
-    if (!st) return;
-    st.textContent = text;
-    st.classList.toggle("err", !!isError);
-  }
-
-  _scheduleInfoSave() {
-    if (!this._infoEditing) return;
-    this._setInfoStatus("Saving…");
-    clearTimeout(this._infoSaveT);
-    this._infoSaveT = setTimeout(() => this._saveInfo(), 700);
-  }
-
-  async _saveInfo() {
-    clearTimeout(this._infoSaveT);
-    this._infoSaveT = null;
-    const key = this._infoKey;
-    // Only ever save what's in an open editor: saving from a torn-down one
-    // would read zero rows and wipe the pack's info.
-    if (!key || !this._hass || !this._infoEl.querySelector(".info-rows")) return;
-    const fields = this._readInfoRows().filter((f) => f.label || f.value);
-    const seq = (this._infoSaveSeq = (this._infoSaveSeq || 0) + 1);
-    try {
-      await this._hass.callWS({ type: "frontend/set_system_data", key, value: { v: 1, fields } });
-      if (key !== this._infoKey) return;    // flushed while switching packs
-      this._infoFields = fields;
-      if (seq === this._infoSaveSeq) this._setInfoStatus("Saved");
-    } catch (err) {
-      const why = err && err.code === "unauthorized" ? " — only admins can edit" : "";
-      this._setInfoStatus(`Couldn't save${why}`, true);
-    }
-  }
-
-  _onInfoClick(e) {
-    const t = e.composedPath()[0];
-    if (t && t.classList && (t.classList.contains("k") || t.classList.contains("v"))) return this._acUpdate(t);
-    const btn = e.composedPath().find((n) => n.dataset && n.dataset.info);
-    if (!btn) return;
-    const act = btn.dataset.info;
-    if (act === "edit") this._startInfoEdit();
-    else if (act === "done") this._finishInfoEdit();
-    else if (act === "add") {
-      const list = this._infoEl.querySelector(".info-rows");
-      list.insertAdjacentHTML("beforeend", this._infoRowHtml({ id: newFieldId(), label: "", value: "" }));
-      list.lastElementChild.querySelector(".k").focus();
-    } else if (act === "del") {
-      btn.closest(".info-row").remove();
-      this._scheduleInfoSave();
-    }
-  }
-
-  _onInfoKey(e) {
-    const t = e.composedPath()[0];
-    if (!t || !t.classList) return;
-    if (this._ac && t === this._ac.input) {
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); return this._acMove(e.key === "ArrowDown" ? 1 : -1); }
-      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); return this._acAccept(this._ac.idx); }
-      if (e.key === "Escape") { e.preventDefault(); return this._acClose(); }
-    }
-    // Arrow keys on the handle reorder: the keyboard (and screen-reader)
-    // alternative to dragging.
-    if (t.classList.contains("drag") && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
-      e.preventDefault();
-      const row = t.closest(".info-row");
-      const sib = e.key === "ArrowUp" ? row.previousElementSibling : row.nextElementSibling;
-      if (!sib) return;
-      this._acClose();
-      row.parentElement.insertBefore(row, e.key === "ArrowUp" ? sib : sib.nextElementSibling);
-      t.focus();
-      this._scheduleInfoSave();
-    }
-    // Enter in a value jumps to the next row, adding one at the end.
-    if (t.classList.contains("v") && e.key === "Enter") {
-      e.preventDefault();
-      const next = t.closest(".info-row").nextElementSibling;
-      if (next) next.querySelector(".k").focus();
-      else this._infoEl.querySelector('[data-info="add"]').click();
-    }
-  }
-
-  // Pointer-based drag (mouse, touch and pen alike). Listeners go on window:
-  // moving the row re-parents the handle, which drops pointer capture.
-  _onInfoPointer(e) {
-    const item = e.composedPath().find((n) => n.classList && n.classList.contains("ac-item"));
-    if (item) { e.preventDefault(); return this._acAccept(+item.dataset.i); }   // keep focus in the input
-    const handle = e.composedPath().find((n) => n.classList && n.classList.contains("drag"));
-    if (!handle || (e.pointerType === "mouse" && e.button !== 0)) return;
-    e.preventDefault();
-    this._acClose();
-    const row = handle.closest(".info-row"), list = row.parentElement;
-    const order = () => [...list.children].map((r) => r.dataset.id).join();
-    const before = order();
-    row.classList.add("dragging");
-    const move = (ev) => {
-      let target = null;
-      for (const r of list.children) {
-        if (r === row) continue;
-        const b = r.getBoundingClientRect();
-        if (ev.clientY < b.top + b.height / 2) { target = r; break; }
-      }
-      if (target !== row.nextElementSibling) list.insertBefore(row, target);
-    };
-    const end = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      row.classList.remove("dragging");
-      if (order() !== before) this._scheduleInfoSave();
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end);
-    window.addEventListener("pointercancel", end);
-  }
-
-  // ─── Template autocomplete ───────────────────────────────────────────────
-  _onInfoInput(e) {
-    const t = e.composedPath()[0];
-    if (!t || !t.classList || !(t.classList.contains("k") || t.classList.contains("v"))) return;
-    // Typing "{{" or "{%" closes the block and leaves the cursor inside it.
-    if (e.inputType === "insertText" && (e.data === "{" || e.data === "%")) {
-      const pos = t.selectionStart, pre = t.value.slice(0, pos), post = t.value.slice(pos);
-      const close = pre.endsWith("{{") ? "}}" : pre.endsWith("{%") ? "%}" : null;
-      if (close && !/^\s*(\}\}|%\})/.test(post)) {
-        t.value = `${pre}  ${close}${post}`;
-        t.setSelectionRange(pos + 1, pos + 1);
-      }
-    }
-    this._schedulePreviews();
-    this._acUpdate(t);
-  }
-
-  // What is being typed at the cursor, if it's inside an open {{ or {% block.
-  _acContext(pre) {
-    const o = Math.max(pre.lastIndexOf("{{"), pre.lastIndexOf("{%"));
-    if (o < 0) return null;
-    const inner = pre.slice(o + 2);
-    if (/\}\}|%\}/.test(inner)) return null;
-    let m;
-    if ((m = /state_attr\(\s*(['"])([\w.]+)\1\s*,\s*['"](\w*)$/.exec(inner))) return { kind: "attr", entity: m[2], partial: m[3] };
-    if ((m = /['"]([\w.]*)$/.exec(inner)) &&
-        (/\b(?:states|state_attr|is_state|is_state_attr|has_value|state_translated|area_name|area_id|device_id|expand|closest)\(\s*$/.test(inner.slice(0, m.index)) ||
-         /^[a-z_]+\./.test(m[1]))) return { kind: "entity", partial: m[1] };
-    if ((m = /\bstates\.([a-z_]+\.?\w*)$/.exec(inner))) return { kind: "entity", partial: m[1], bare: true };
-    if ((m = /\|\s*([a-z_]*)$/.exec(inner))) return { kind: "filter", partial: m[1] };
-    if (!inner.trim()) return { kind: "func", partial: "" };
-    if ((m = /(?:^|[\s(,+\-*/%<>=!])([a-z_]+)$/.exec(inner))) return { kind: "func", partial: m[1] };
-    return null;
-  }
-
-  _acItems(ctx) {
-    const q = ctx.partial.toLowerCase();
-    const pick = (list) => [...list.filter(([n]) => n.startsWith(q)), ...list.filter(([n]) => !n.startsWith(q) && n.includes(q))]
-      .slice(0, 8).map(([name, insert, back, hint]) => ({ main: name, sub: hint, insert, back }));
-    if (ctx.kind === "func") return pick(TPL_FUNCS);
-    if (ctx.kind === "filter") return pick(TPL_FILTERS);
-    if (ctx.kind === "attr") {
-      const attrs = (this._hass.states[ctx.entity] || {}).attributes || {};
-      return Object.keys(attrs).filter((k) => k.toLowerCase().includes(q))
-        .sort((a, b) => (b.toLowerCase().startsWith(q) - a.toLowerCase().startsWith(q)) || a.localeCompare(b))
-        .slice(0, 8).map((k) => ({ main: k, sub: tplText(attrs[k]).slice(0, 40), insert: k, back: 0 }));
-    }
-    // Entities: this pack's own first, then the rest; id matches before name matches.
-    const own = this._packEntities(), prefix = orNull(this._config.prefix);
-    const hits = [];
-    for (const [id, st] of Object.entries(this._hass.states)) {
-      const name = String((st.attributes && st.attributes.friendly_name) || "");
-      const obj = id.slice(id.indexOf(".") + 1);
-      const rank = !q || id.startsWith(q) || obj.startsWith(q) ? 0 : id.includes(q) ? 1 : name.toLowerCase().includes(q) ? 2 : -1;
-      if (rank < 0) continue;
-      const mine = own.has(id) || (prefix && obj.startsWith(`${prefix}_`)) ? 0 : 1;
-      hits.push([mine, rank, id, name, st]);
-    }
-    hits.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2].localeCompare(b[2]));
-    return hits.slice(0, 8).map(([, , id, name, st]) => {
-      const unit = st.attributes && st.attributes.unit_of_measurement;
-      return { main: id, sub: `${name ? `${name} · ` : ""}${st.state}${unit ? ` ${unit}` : ""}`, insert: id, back: 0 };
-    });
-  }
-
-  _packEntities() {
-    const set = new Set(Object.values(this._resolveEntities()).filter(Boolean));
-    for (let n = 1; n <= (this._cells() || 0); n++) { set.add(this._cellEntity("v", n)); set.add(this._cellEntity("r", n)); }
-    return set;
-  }
-
-  _acUpdate(input) {
-    if (!this._infoEditing || !input || !input.classList || !(input.classList.contains("k") || input.classList.contains("v"))) return this._acClose();
-    const pos = input.selectionStart;
-    const ctx = pos === input.selectionEnd ? this._acContext(input.value.slice(0, pos)) : null;
-    const items = ctx ? this._acItems(ctx) : [];
-    if (!items.length) return this._acClose();
-    if (this._ac && this._ac.input !== input) this._acClose();
-    if (!this._ac) {
-      const el = document.createElement("div");
-      el.className = "ac";
-      el.setAttribute("role", "listbox");
-      input.closest(".info-row").appendChild(el);   // inline: can't be clipped by the card or covered by the next one
-      this._ac = { el, input };
-      input.setAttribute("aria-expanded", "true");
-    }
-    Object.assign(this._ac, { ctx, items, idx: 0 });
-    this._ac.el.innerHTML = items.map((it, i) => `
-      <div class="ac-item${i ? "" : " on"}" role="option" aria-selected="${!i}" data-i="${i}">
-        <span class="ac-main">${this._esc(it.main)}</span><span class="ac-sub">${this._esc(it.sub)}</span>
-      </div>`).join("");
-  }
-
-  _acMove(d) {
-    const ac = this._ac, n = ac.items.length;
-    ac.idx = (ac.idx + d + n) % n;
-    ac.el.querySelectorAll(".ac-item").forEach((el, i) => {
-      el.classList.toggle("on", i === ac.idx);
-      el.setAttribute("aria-selected", String(i === ac.idx));
-    });
-  }
-
-  _acAccept(i) {
-    const ac = this._ac, it = ac && ac.items[i];
-    if (!it) return;
-    const inp = ac.input, pos = inp.selectionStart, post = inp.value.slice(pos);
-    const start = pos - ac.ctx.partial.length;
-    let caret = start + it.insert.length - it.back;
-    // After an entity or attribute, step over the quote(s) the snippet already
-    // closed: states('x')| and state_attr('x', '|').
-    if ((ac.ctx.kind === "entity" && !ac.ctx.bare) || ac.ctx.kind === "attr") {
-      const skip = /^(['"]\)|['"],\s*['"]|['"])/.exec(post);
-      if (skip) caret = start + it.insert.length + skip[0].length;
-    }
-    inp.value = inp.value.slice(0, start) + it.insert + post;
-    inp.setSelectionRange(caret, caret);
-    this._acClose();
-    inp.dispatchEvent(new Event("input", { bubbles: true, composed: true }));   // save, preview, next suggestions
-  }
-
-  _acClose() {
-    const ac = this._ac;
-    this._ac = null;
-    if (!ac) return;
-    ac.el.remove();
-    ac.input.setAttribute("aria-expanded", "false");
-  }
-
-  // ─── Headless use (battery-stacked-pack-card) ───────────────────────────
-  // A pack card that never goes on screen: it renders nothing and loads no
-  // pack info, it only resolves this pack's entities (prefix defaults,
-  // overrides, templates, unit detection) and hands back the headline values.
-  static summarySource(config, onChange) {
-    const el = document.createElement("battery-pack-card");
-    el._summaryCb = onChange;
-    el.setConfig(config);
-    return el;
-  }
-
-  // Templates need a live subscription; the owner switches it with its own
-  // connected state, since this element is never connected itself.
-  setSummaryLive(live) {
-    this._summaryLive = !!live;
-    this._syncCfgTemplates();
-  }
-
-  // Values are null when the setting resolves to no entity in HA (show
-  // nothing) and NaN when the entity exists but has no number (show "—").
-  summary() {
-    if (!this._hass || !this._config) return null;
-    const cfg = this._config, E = this._resolveEntities();
-    const val = (eid) => (this._exists(eid) ? this._raw(eid) : null);
-    const has = (eid) => this._exists(eid);
-
-    let deltaMv = null, cellMin = null, cellMax = null;
-    const sSc = this._voltScaleFor(
-      [E.vMin, E.vAvg, E.vMax].map((e) => this._raw(e)),
-      voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from), "Min/avg/max voltages",
-    );
-    if (has(E.vMin) && has(E.vMax)) { cellMin = this._raw(E.vMin) * sSc; cellMax = this._raw(E.vMax) * sSc; }
-    else {
-      const raws = [];
-      for (let n = 1; n <= this._cells(); n++) raws.push(this._raw(this._cellEntity("v", n)));
-      const vSc = this._voltScaleFor(raws, voltScale(cfg.cell_voltage_from), "Cell voltages");
-      const v = raws.filter((x) => Number.isFinite(x) && x > 0).map((x) => x * vSc);
-      if (v.length) { cellMin = Math.min(...v); cellMax = Math.max(...v); }
-    }
-    if (has(E.vDelta)) deltaMv = this._raw(E.vDelta) * sSc * 1000;
-    else if (Number.isFinite(cellMin) && Number.isFinite(cellMax)) deltaMv = (cellMax - cellMin) * 1000;
-    const dBand = deltaBands(cfg);
-    const deltaState = !Number.isFinite(deltaMv) ? "" : deltaMv >= dBand.bad ? "bad" : deltaMv >= dBand.warn ? "warn" : "ok";
-
-    // Hottest sensor, in the unit the card shows, with its band colour. The
-    // ambient temperature is not the battery, so it stays out of this.
-    let temp = null;
-    for (const eid of this._packTemps(E)) {
-      if (!has(eid)) continue;
-      const t = this._tempInfo(eid);
-      if (t.shown !== null && (!temp || t.shown > temp.shown)) temp = t;
-    }
-
-    return {
-      name: cfg.name,
-      soc: val(E.soc), soh: val(E.soh),
-      voltage: val(E.packV),
-      current: has(E.curA) ? this._raw(E.curA) * this._sign() : null,
-      power: has(E.powW) ? this._watts(E.powW) * this._sign() : null,
-      cellMin, cellMax,
-      capacityRemaining: has(E.capRem) ? this._capacity(E.capRem).ah : null,
-      capacityTotal: has(E.capTot) ? this._capacity(E.capTot).ah : null,
-      energyRemaining: has(E.capRem) ? this._capacity(E.capRem).kwh : null,
-      energyTotal: has(E.capTot) ? this._capacity(E.capTot).kwh : null,
-      nominalVoltage: this._nominalV(),
-      deltaMv, deltaState, temp,
-      alarm: has(E.alarmB) ? this._on(E.alarmB) : (this._tmpl() && (has(E.alarmN) || has(E.alarmS)) ? this._tmplAlarm(E) : null),
-      alarmText: has(E.alarmS) ? this._state(E.alarmS) : null,
-      charge: has(E.chg) ? this._on(E.chg) : null,
-      discharge: has(E.dch) ? this._on(E.dch) : null,
-      entities: E,
-    };
-  }
-
-  // The sensors that say how warm the battery is. The MOSFET only counts when
-  // temp_include_mos is on, or when the pack has nothing else to go on.
-  _packTemps(E) {
-    const v = this._config.temp_include_mos;
-    const probes = [E.t1, E.t2, E.t3, E.t4].filter((eid) => this._exists(eid));
-    return v === true || v === "true" || !probes.length ? [E.tMos, ...probes] : probes;
-  }
-
-  // What the alert automations read for this pack: each entity setting as a
-  // Jinja expression (an entity's state, or the body of a one-expression
-  // template), the voltage scales as currently detected, and the card's own
-  // bands in Home Assistant's temperature unit. Settings that point at
-  // nothing in HA are left out, so an alert only covers what the pack has.
-  alertInputs() {
-    if (!this._hass || !this._config) return null;
-    const cfg = this._config, E = this._resolveEntities();
-    const haF = isFahrenheit(this._hass.config?.unit_system?.temperature);
-    const expr = (eid) => {
-      if (!eid || !this._exists(eid)) return null;
-      const ref = attrRef(eid);
-      if (ref) {
-        const list = `(state_attr('${ref[1]}', '${ref[2]}') or [])`;
-        const x = `(${list}[${ref[3]}] | float(none) if has_value('${ref[1]}') and ${list} | count > ${ref[3]} else none)`;
-        // °C in the list; the alerts compare in HA's unit.
-        return ATTR_CELSIUS.has(ref[2]) && haF ? `(${x} * 9 / 5 + 32 if ${x} is number else none)` : x;
-      }
-      if (!isTpl(eid)) return `states('${eid}')`;
-      const m = /^\s*\{\{([\s\S]*)\}\}\s*$/.exec(eid);
-      return m && !/\{\{|\}\}|\{%|\{#/.test(m[1]) ? `(${m[1].trim()})` : null;
-    };
-    const ent = (eid) => (eid && !isTpl(eid) && this._exists(eid) ? eid : null);
-    const cellIds = [];
-    for (let n = 1; n <= (this._cells() || 0); n++) cellIds.push(this._cellEntity("v", n));
-    const sSc = this._voltScaleFor([E.vMin, E.vAvg, E.vMax].map((e) => this._raw(e)), voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from), "Min/avg/max voltages");
-    const vSc = this._voltScaleFor(cellIds.map((e) => this._raw(e)), voltScale(cfg.cell_voltage_from), "Cell voltages");
-    // Temperature bands as the card shows them, converted into HA's unit
-    // (what states() of a temperature sensor is in).
-    const want = String(cfg.temperature_unit || "auto").toUpperCase();
-    const inF = want === "F" || (want !== "C" && haF);
-    const toBand = (x) => (inF ? x * 9 / 5 + 32 : x);
-    const toHa = (x) => (inF === haF ? x : haF ? x * 9 / 5 + 32 : (x - 32) * 5 / 9);
-    const [tc, tw, th] = [numOrAny(cfg.temp_cold, toBand(5)), numOrAny(cfg.temp_warm, toBand(35)), numOrAny(cfg.temp_hot, toBand(50))]
-      .sort((a, b) => a - b).map((x) => +toHa(x).toFixed(1));
-    const d = deltaBands(cfg);
-    return {
-      name: cfg.name,
-      cells: cellIds.map(expr).filter(Boolean),
-      vmin: expr(E.vMin), vmax: expr(E.vMax), delta: expr(E.vDelta),
-      sSc, vSc,
-      temps: this._packTemps(E).map(expr).filter(Boolean),
-      soc: expr(E.soc),
-      alarmB: ent(E.alarmB), alarmS: ent(E.alarmS), chg: ent(E.chg), dch: ent(E.dch),
-      bands: { dw: d.warn, da: d.bad, tw, th, tc },
-    };
-  }
-
-  getCardSize() {
-    const c = this._config || {};
-    let n = 2;
-    if (c.show_battery || c.show_stats) n += 3;
-    if (c.show_pills) n += 1;
-    if (c.show_cells) n += 3;
-    if (c.show_summary) n += 1;
-    if (c.show_temperatures) n += 1;
-    return n;
-  }
-
-  // Any entity setting may instead hold a template; it reads like a state
-  // once Home Assistant has rendered it (see _syncCfgTemplates).
-  _state(eid) {
-    if (!eid) return undefined;
-    const ref = attrRef(eid);
-    if (ref) {
-      const st = this._hass?.states[ref[1]];
-      if (!st || /^(unknown|unavailable)$/.test(st.state)) return undefined;
-      const list = st.attributes && st.attributes[ref[2]];
-      const item = Array.isArray(list) ? list[Number(ref[3])] : undefined;
-      // Plain numbers, or { value, type } for BMS_BLE's temperature sensors.
-      const v = item !== null && typeof item === "object" ? item.value : item;
-      return Number.isFinite(parseFloat(v)) ? String(v) : undefined;
-    }
-    if (isTpl(eid)) {
-      const e = this._cfgTpl && this._cfgTpl.get(eid);
-      return e && !e.error && e.result !== undefined ? tplText(e.result) : undefined;
-    }
-    return this._hass?.states[eid]?.state;
-  }
-  _exists(eid){ return isTpl(eid) || attrRef(eid) ? this._state(eid) !== undefined : !!(eid && this._hass?.states[eid]); }
-  _num(eid)   { const v = parseFloat(this._state(eid)); return Number.isFinite(v) ? v : 0; }
-  // Power in W, whatever unit the entity reports it in (W, kW, MW): a
-  // 3.25 kW sensor read as a bare number showed as "3 W". A template's
-  // result has no unit and is taken as W.
-  // Nominal pack voltage, for converting Ah into kWh.
-  _nominalV() {
-    const v = numOr(this._config.nominal_voltage, 0);
-    return v > 0 ? v : (intOr(this._cells(), 16) || 16) * NOMINAL_CELL_V;
-  }
-
-  // A capacity reading as { ah, kwh }. Most BMSes report Ah; a sensor in Wh
-  // or kWh is energy already, and Ah is then worked back from the nominal V.
-  _capacity(eid) {
-    const v = parseFloat(this._state(eid));
-    if (!Number.isFinite(v)) return { ah: NaN, kwh: NaN };
-    const u = isTpl(eid) ? "" : String(this._hass?.states[eid]?.attributes?.unit_of_measurement || "").trim();
-    const nv = this._nominalV();
-    if (/^kWh$/i.test(u)) return { ah: (v * 1000) / nv, kwh: v };
-    if (/^Wh$/i.test(u)) return { ah: v / nv, kwh: v / 1000 };
-    return { ah: v, kwh: (v * nv) / 1000 };
-  }
-
-  // "624.0 / 628 Ah" or "31.9 / 32.2 kWh", as configured.
-  _capacityText(E) {
-    const r = this._capacity(E.capRem), t = this._capacity(E.capTot);
-    const z = (x) => (Number.isFinite(x) ? x : 0);
-    // BMS_BLE only has a total when the BMS reports its design capacity.
-    if (this._ble() && !this._exists(E.capTot)) {
-      return this._config.capacity_unit === "kWh" ? `${fmt(z(r.kwh), 1)} kWh` : `${fmt(z(r.ah), 1)} Ah`;
-    }
-    if (this._config.capacity_unit === "kWh") return `${fmt(z(r.kwh), 1)} / ${fmt(z(t.kwh), 1)} kWh`;
-    return `${fmt(z(r.ah), 1)} / ${fmt(z(t.ah), 0)} Ah`;
-  }
-
-  _watts(eid) {
-    const v = parseFloat(this._state(eid));
-    if (!Number.isFinite(v)) return NaN;
-    const u = isTpl(eid) ? "" : String(this._hass?.states[eid]?.attributes?.unit_of_measurement || "").trim();
-    return /^kW$/i.test(u) ? v * 1000 : /^MW$/i.test(u) ? v * 1e6 : v;
-  }
-  // -1 when the BMS reports charging as negative current (invert_current).
-  _sign() { const v = this._config.invert_current; return v === true || v === "true" ? -1 : 1; }
-  _on(eid)    { return /^(on|true)$/i.test(String(this._state(eid))); }
-  // Templated packs: an alarm is active when the count says so or the error
-  // text says something other than "no error".
-  _tmplAlarm(E) {
-    if (this._num(E.alarmN) > 0) return true;
-    const s = String(this._state(E.alarmS) ?? "").trim().toLowerCase();
-    return !["", "normal", "ok", "none", "no alarm", "no error", "no errors", "off", "0"].includes(s);
-  }
-  _raw(eid)   { return parseFloat(this._state(eid)); }
-
-  // Effective V scale for a group of readings. The data wins over the
-  // configured unit: for cell voltages the magnitude is unambiguous (see
-  // MV_CUTOFF), and a wrong unit silently breaks the colouring rather than
-  // just the formatting. Config is the fallback when nothing readable is in.
-  _voltScaleFor(raws, configured, what) {
-    const sample = raws.find((v) => Number.isFinite(v) && v > 0);
-    if (sample === undefined) return configured;
-    const detected = sample >= MV_CUTOFF ? 0.001 : 1;
-    if (detected !== configured) this._noteUnit(what, detected);
-    return detected;
-  }
-
-  // Tell the user once per session, so a mis-set unit is diagnosable from the
-  // browser console instead of looking like a colouring bug.
-  _noteUnit(what, scale) {
-    this._unitNotes = this._unitNotes || new Set();
-    const key = `${what}:${scale}`;
-    if (this._unitNotes.has(key)) return;
-    this._unitNotes.add(key);
-    console.info(
-      `%c BATTERY-PACK-CARD %c ${what} read like ${scale === 0.001 ? "mV" : "V"}; using that instead of the configured unit. Set the matching source unit in the card editor to silence this.`,
-      "color:#fff;background:#3949ab;border-radius:3px", "color:inherit",
-    );
-  }
-
-  // The alarm entities' prefix. Set in the config: used as is. Not set: the
-  // classic {prefix}_{prefix} when that exists, as always; only when it
-  // doesn't, look for alarm entities that belong to this prefix, so other
-  // naming (e.g. the add-on's Multi-Pack mode) works without configuring it.
-  // Searched at most every 30 s while nothing is found.
-  _alarmBase() {
-    const c = this._config, st = this._hass?.states;
-    if (!this._alarmAuto || !st) return c.alarm_prefix;
-    const has = (ap) => !!(st[`sensor.${ap}_alarm_status`] || st[`binary_sensor.${ap}_alarm_active`]);
-    if (has(c.alarm_prefix)) return c.alarm_prefix;
-    if (this._alarmFound && has(this._alarmFound)) return this._alarmFound;
-    const now = Date.now();
-    if (this._alarmFound === null && now - (this._alarmScan || 0) < 30000) return c.alarm_prefix;
-    this._alarmScan = now;
-    const p = c.prefix;
-    const ours = (ap) => ap === p || ap.startsWith(`${p}_`) || ap.endsWith(`_${p}`) || ap.includes(`_${p}_`);
-    const found = Object.keys(st)
-      .map((id) => /^(?:sensor\.(.+)_alarm_status|binary_sensor\.(.+)_alarm_active)$/.exec(id))
-      .filter(Boolean).map((m) => m[1] || m[2])
-      .filter(ours)
-      .sort((a, b) => a.length - b.length)[0];
-    this._alarmFound = found || null;
-    return found || c.alarm_prefix;
-  }
-
-  // The add-on names the DRY contacts after the bare BMS (bms_1_dry1_contact)
-  // even when the other sensors carry a longer prefix (bms_1_bms_…), so try
-  // the prefix and then each shorter form of it.
-  _dryDefault(n) {
-    const p = this._config.prefix, st = this._hass?.states;
-    if (!p) return null;
-    const parts = p.split("_");
-    for (let i = parts.length; i > 0 && st; i--) {
-      const id = `binary_sensor.${parts.slice(0, i).join("_")}_dry${n}_contact`;
-      if (st[id]) return id;
-    }
-    return `binary_sensor.${p}_dry${n}_contact`;
-  }
-
-  // The template this card uses (see TEMPLATES), if any.
-  _tmpl() { return TEMPLATES[orNull(this._config && this._config.template)] || null; }
-
-  // The BMS_BLE battery this card shows, if any (see bleEntities).
-  _ble() { return orNull(this._config && this._config.bms_ble_device); }
-
-  // Number of cells: as set, or for a BMS_BLE battery without `cells` set,
-  // as many as it reports.
-  _cells() {
-    if (this._ble() && !this._cellsSet) return bleCellCount(this._hass, this._ble()) || this._config.cells;
-    if (this._tmpl() && !this._cellsSet) return templateCellCount(this._hass, this._config.template, this._config.prefix) || this._config.cells;
-    return this._config.cells;
-  }
-
-  // A BMS_BLE battery's entities, with the same keys as below. Every
-  // entity_* setting still overrides. Temperatures come from the list on its
-  // temperature sensor: the MOSFET one by its type, the others as probes.
-  _bleResolve() {
-    const c = this._config, B = bleEntities(this._hass, this._ble());
-    const t = { tMos: null, t1: B.temp || null, t2: null, t3: null, t4: null };
-    const list = B.temp && this._hass.states[B.temp].attributes.temperature_sensors;
-    if (Array.isArray(list) && list.length) {
-      const ref = (i) => `${B.temp}@temperature_sensors[${i}]`;
-      const MOSFET = 4;   // aiobmsble's TempSensor.T.MOSFET
-      const mos = list.findIndex((x) => x && typeof x === "object" && x.type === MOSFET);
-      const probes = list.map((x, i) => i).filter((i) => i !== mos);
-      Object.assign(t, { tMos: mos >= 0 ? ref(mos) : null, t1: null });
-      probes.slice(0, 4).forEach((i, k) => { t[`t${k + 1}`] = ref(i); });
-    }
-    return {
-      soc:      pick(c.entity_soc,                B.soc),
-      soh:      pick(c.entity_soh,                B.soh),
-      packV:    pick(c.entity_pack_voltage,       B.packV),
-      curA:     pick(c.entity_current,            B.curA),
-      powW:     pick(c.entity_power,              B.powW),
-      balA:     pick(c.entity_balance_current,    null),
-      heatA:    pick(c.entity_heating_current,    null),
-      cycles:   pick(c.entity_cycles,             B.cycles),
-      capRem:   pick(c.entity_capacity_remaining, B.capRem),
-      capTot:   pick(c.entity_capacity_total,     B.capTot),
-      runtime:  pick(c.entity_runtime,            B.runtime),
-      phase:    pick(c.entity_charge_phase,       null),
-      vAvg:     pick(c.entity_cell_voltage_avg,   null),
-      vMin:     pick(c.entity_cell_voltage_min,   B.vMin),
-      vMax:     pick(c.entity_cell_voltage_max,   B.vMax),
-      vDelta:   pick(c.entity_cell_voltage_delta, B.vDelta),
-      minCell:  pick(c.entity_cell_min_number,    null),
-      maxCell:  pick(c.entity_cell_max_number,    null),
-      alarmS:   pick(c.entity_alarm_status,       null),
-      alarmB:   pick(c.entity_alarm_active,       B.alarmB),
-      chg:      pick(c.entity_switch_charge,      B.chg),
-      dch:      pick(c.entity_switch_discharge,   B.dch),
-      balAct:   pick(c.entity_balance_active,     B.balAct),
-      balAllow: pick(c.entity_switch_balance,     null),
-      heat:     pick(c.entity_heating,            B.heat),
-      dry1:     pick(c.entity_dry1,               null),
-      dry2:     pick(c.entity_dry2,               null),
-      tMos:     pick(c.entity_temp_mos,     t.tMos),
-      t1:       pick(c.entity_temp_probe_1, t.t1),
-      t2:       pick(c.entity_temp_probe_2, t.t2),
-      t3:       pick(c.entity_temp_probe_3, t.t3),
-      t4:       pick(c.entity_temp_probe_4, t.t4),
-      tAmb:     pick(c.entity_temp_ambient, null),
-    };
-  }
-
-  // BMS_BLE reports the runtime as a duration (hours by default): "5h 30m".
-  _bleRuntime(eid) {
-    const v = this._state(eid);
-    const n = parseFloat(v);
-    if (!Number.isFinite(n) || isTpl(eid)) return v || "";
-    const u = String(this._hass?.states[eid]?.attributes?.unit_of_measurement || (this._tmpl() && this._tmpl().runtimeUnit) || "h");
-    const min = Math.round(n * ({ s: 1 / 60, min: 1, h: 60, d: 1440 }[u] || 60));
-    if (min < 0) return "—";
-    const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
-    return [d ? `${d}d` : "", h ? `${h}h` : "", !d && (m || !h) ? `${m}m` : ""].filter(Boolean).join(" ");
-  }
-
-  // A templated pack's entities (see TEMPLATES), with the same keys as below.
-  // Every entity_* setting still overrides; what the template has no entity
-  // for stays null, so that tile, pill or line is simply not shown.
-  _tmplResolve(T) {
-    const c = this._config, p = c.prefix;
-    const d = (k) => { const m = T.entities[k]; return p && m ? `${m[0]}.${p}_${m[1]}` : null; };
-    return {
-      soc:      pick(c.entity_soc,                d("soc")),
-      soh:      pick(c.entity_soh,                d("soh")),
-      packV:    pick(c.entity_pack_voltage,       d("packV")),
-      curA:     pick(c.entity_current,            d("curA")),
-      powW:     pick(c.entity_power,              d("powW")),
-      balA:     pick(c.entity_balance_current,    d("balA")),
-      cycles:   pick(c.entity_cycles,             d("cycles")),
-      capRem:   pick(c.entity_capacity_remaining, d("capRem")),
-      capTot:   pick(c.entity_capacity_total,     d("capTot")),
-      runtime:  pick(c.entity_runtime,            d("runtime")),
-      phase:    pick(c.entity_charge_phase,       d("phase")),
-      vAvg:     pick(c.entity_cell_voltage_avg,   d("vAvg")),
-      vMin:     pick(c.entity_cell_voltage_min,   d("vMin")),
-      vMax:     pick(c.entity_cell_voltage_max,   d("vMax")),
-      vDelta:   pick(c.entity_cell_voltage_delta, d("vDelta")),
-      minCell:  pick(c.entity_cell_min_number,    d("minCell")),
-      maxCell:  pick(c.entity_cell_max_number,    d("maxCell")),
-      alarmS:   pick(c.entity_alarm_status,       d("alarmS")),
-      alarmB:   pick(c.entity_alarm_active,       d("alarmB")),
-      alarmN:   d("alarmN"),
-      chg:      pick(c.entity_switch_charge,      d("chg")),
-      dch:      pick(c.entity_switch_discharge,   d("dch")),
-      balAct:   pick(c.entity_balance_active,     d("balAct")),
-      balAllow: pick(c.entity_switch_balance,     d("balAllow")),
-      heat:     pick(c.entity_heating,            d("heat")),
-      heatA:    pick(c.entity_heating_current,    d("heatA")),
-      dry1:     pick(c.entity_dry1,               d("dry1")),
-      dry2:     pick(c.entity_dry2,               d("dry2")),
-      tMos:     pick(c.entity_temp_mos,           d("tMos")),
-      t1:       pick(c.entity_temp_probe_1,       d("t1")),
-      t2:       pick(c.entity_temp_probe_2,       d("t2")),
-      t3:       pick(c.entity_temp_probe_3,       d("t3")),
-      t4:       pick(c.entity_temp_probe_4,       d("t4")),
-      tAmb:     pick(c.entity_temp_ambient,       d("tAmb")),
-    };
-  }
-
-  _resolveEntities() {
+  // Boxes are created once per config and then only have their contents
+  // swapped, so the open detail row (a sibling in the same grid) survives
+  // every state update.
+  _buildCabinet() {
+    if (this._ro) this._ro.disconnect();
+    this._ro = null;
+    this._dropDetail();
     const c = this._config;
-    if (this._ble()) return this._bleResolve();
-    const T = this._tmpl();
-    if (T) return this._tmplResolve(T);
-    const p = c.prefix;
-    const ap = this._alarmBase();
-    const def = (suf, dom = "sensor") => (p ? `${dom}.${p}_${suf}` : null);
-    const adef = (suf, dom = "sensor") => (ap ? `${dom}.${ap}_${suf}` : null);
-    return {
-      soc:      pick(c.entity_soc,      def("soc_pourcentage")),
-      soh:      pick(c.entity_soh,      def("soh_pourcentage")),
-      packV:    pick(c.entity_pack_voltage,    def("tension_totale_volt")),
-      curA:     pick(c.entity_current,         def("courant_total")),
-      powW:     pick(c.entity_power,           def("puissance_totale")),
-      balA:     pick(c.entity_balance_current, def("balance_courant")),
-      heatA:    pick(c.entity_heating_current, null),
-      cycles:   pick(c.entity_cycles,          def("nombre_cycle")),
-      capRem:   pick(c.entity_capacity_remaining, def("capacite_restante_ah")),
-      capTot:   pick(c.entity_capacity_total,     def("capacite_batterie_ah")),
-      runtime:  pick(c.entity_runtime,            def("total_runtime_formatted")),
-      phase:    pick(c.entity_charge_phase,       def("charge_status_text")),
-      vAvg:     pick(c.entity_cell_voltage_avg,   def("cell_voltage_average")),
-      vMin:     pick(c.entity_cell_voltage_min,   def("cell_voltage_min_value")),
-      vMax:     pick(c.entity_cell_voltage_max,   def("cell_voltage_max_value")),
-      vDelta:   pick(c.entity_cell_voltage_delta, def("cell_voltage_delta")),
-      minCell:  pick(c.entity_cell_min_number,    def("cell_voltage_min_number")),
-      maxCell:  pick(c.entity_cell_max_number,    def("cell_voltage_max_number")),
-      alarmS:   pick(c.entity_alarm_status, adef("alarm_status")),
-      alarmB:   pick(c.entity_alarm_active, adef("alarm_active", "binary_sensor")),
-      chg:      pick(c.entity_switch_charge,   def("switch_charge",   "binary_sensor")),
-      dch:      pick(c.entity_switch_discharge,def("switch_decharge", "binary_sensor")),
-      balAct:   pick(c.entity_balance_active,  def("balance_action",  "binary_sensor")),
-      balAllow: pick(c.entity_switch_balance,  def("switch_balance",  "binary_sensor")),
-      heat:     pick(c.entity_heating,         def("heating",         "binary_sensor")),
-      // jkbms-rs485-addon 4.1.12+: live state of the two dry-contact relays.
-      dry1:     pick(c.entity_dry1,            this._dryDefault(1)),
-      dry2:     pick(c.entity_dry2,            this._dryDefault(2)),
-      tMos:     pick(c.entity_temp_mos,     def("mos_temp")),
-      t1:       pick(c.entity_temp_probe_1, def("sonde_1_temp")),
-      t2:       pick(c.entity_temp_probe_2, def("sonde_2_temp")),
-      t3:       pick(c.entity_temp_probe_3, def("sonde_3_temp")),
-      t4:       pick(c.entity_temp_probe_4, def("sonde_4_temp")),
-      tAmb:     pick(c.entity_temp_ambient, def("ambient_temp")),
-    };
-  }
-
-  _cellEntity(kind, n) {
-    const c = this._config;
-    if (kind === "t") {
-      // BMSes report module temperatures, not per-cell ones, so a group of
-      // cells shares a sensor: cell n -> group ceil(n / cell_temp_group_size).
-      const tExplicit = orNull(c[`entity_cell_${n}_temp`]);
-      if (tExplicit) return tExplicit;
-      const tPat = orNull(c.cell_temp_pattern);
-      if (!tPat) return null;
-      const size = Math.max(1, intOr(c.cell_temp_group_size, 1));
-      const g = Math.ceil(n / size);
-      return tPat.replace(/\{(g+)\}/g, (_m, digits) => String(g).padStart(digits.length, "0"));
-    }
-    const suffix = kind === "v" ? "volt" : "ohm";
-    // 1. explicit per-cell override wins
-    const explicit = orNull(c[`entity_cell_${n}_${suffix}`]);
-    if (explicit) return explicit;
-    // 2. pattern with {n} / {nn} placeholders
-    const patternKey = kind === "v" ? "cell_voltage_pattern" : "cell_resistance_pattern";
-    const pat = orNull(c[patternKey]);
-    if (pat) {
-      return pat
-        // {n}, {nn}, {nnn}, ... pad to the number of n's, so a pack whose
-        // entities are zero-padded to three digits (cell_001_voltage) works.
-        .replace(/\{(n+)\}/g, (_m, digits) => String(n).padStart(digits.length, "0"));
-    }
-    // 3. the template's cell naming
-    const T = this._tmpl();
-    if (T && c.prefix && T.cell[kind === "v" ? "v" : "r"]) {
-      const f = T.cell[kind === "v" ? "v" : "r"];
-      return `sensor.${c.prefix}_${f.replace(/\{(n+)\}/g, (_m, d) => String(n).padStart(d.length, "0"))}`;
-    }
-    // 3b. a BMS_BLE battery's cell list
-    if (this._ble()) {
-      const e = bleEntities(this._hass, this._ble()).cells;
-      return kind === "v" && e ? `${e}@cell_voltages[${n - 1}]` : null;
-    }
-    // 4. prefix-derived default
-    if (!c.prefix) return null;
-    return `sensor.${c.prefix}_cell_${n}_${suffix}`;
+    this._cab.className = `cabinet${c.layout === "stack" ? " single" : ""}`;
+    this._rack.className = c.layout === "stack" ? "single" : "";
+    this._rack.style.setProperty("--max-cols", c.layout === "stack" ? 1 : intOr(c.columns, 4));
+    this._rack.style.setProperty("--box-min", `${intOr(c.box_min_width, 130)}px`);
+    this._cab.innerHTML = this._packCfgs.map((p, i) =>
+      `<button type="button" class="box" data-i="${i}" style="order:${i * 2}" aria-expanded="false" title="${esc(p.name)}"></button>`,
+    ).join("") + `<div class="bdetail"><div></div></div>`;
+    this._boxes = [...this._cab.querySelectorAll(".box")];
+    this._boxHtml = [];
+    this._detail = this._cab.querySelector(".bdetail");
+    this._headHtml = this._legendHtml = this._dispHtml = null;
+    if (this.isConnected) this.connectedCallback();
   }
 
   _render() {
-    if (!this._hass || !this._config) return;
-    const cfg = this._config;
-    const E = this._resolveEntities();
+    if (!this._config || !this._cab) return;
+    const sums = (this._sources || []).map((s) => s.summary());
+    const c = this._config;
+    // No packs: a display-only card (e.g. the totals of several stacks).
+    this._cab.hidden = !!this._incompatible || !this._packCfgs.length;
+    this._rack.classList.toggle("no-packs", !this._packCfgs.length);
 
-    const soc   = this._num(E.soc);
-    const soh   = this._num(E.soh);
-    const packV = this._num(E.packV);
-    const curA  = this._num(E.curA) * this._sign();
-    // No power sensor: voltage × current, which is what the BMS would report.
-    const powRaw= this._exists(E.powW) ? this._watts(E.powW) * this._sign() : this._num(E.packV) * curA;
-    const powW  = Number.isFinite(powRaw) ? powRaw : 0;
-    const balA  = this._num(E.balA);
-    const heatA = this._num(E.heatA);
-    // A whole number: ESPHome reports 12.0 where the add-on reports 12.
-    const cyclesRaw = this._state(E.cycles), cyclesN = parseFloat(cyclesRaw);
-    const cycles= Number.isFinite(cyclesN) ? String(Math.round(cyclesN)) : (cyclesRaw || "0");
-    const runtime= this._ble() || this._tmpl() ? this._bleRuntime(E.runtime) : this._state(E.runtime) || "";
-    // Voltage units are read off the data (see MV_CUTOFF); the configured
-    // units only apply until a reading is available.
-    const cellRaw = [];
-    for (let n = 1; n <= this._cells(); n++) cellRaw.push(this._raw(this._cellEntity("v", n)));
-    const vScCfg= voltScale(cfg.cell_voltage_from);
-    const vSc   = this._voltScaleFor(cellRaw, vScCfg, "Cell voltages");
-    // Summary (min/avg/max/Δ) entities may come in a different unit than the
-    // per-cell entities; fall back to the cell unit when not set. Δ has no
-    // unambiguous magnitude of its own, so it follows min/avg/max.
-    const sScCfg= voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from);
-    const sSc   = this._voltScaleFor(
-      [E.vMin, E.vAvg, E.vMax].map((e) => this._raw(e)), sScCfg, "Min/avg/max voltages",
-    );
-    const rSc   = ohmScale(cfg.cell_resistance_from);
-    const dev   = devBands(cfg);
-    const dBand = deltaBands(cfg);
-    const maxRed = cfg.max_cell_red === true || cfg.max_cell_red === "true";
-    const minClr = maxRed ? "var(--clr-green)" : "var(--clr-red)";
-    const maxClr = maxRed ? "var(--clr-red)"   : "var(--clr-green)";
-    // Decimals chosen while the unit was wrong were tuned to mis-scaled numbers
-    // (0 makes "3,331.000" read "3,331") and would now turn 3.331 V into "3";
-    // they apply again once the unit is set to match.
-    const unitOk= vSc === vScCfg && sSc === sScCfg;
-    const vDec  = unitOk ? intOr(cfg.cell_voltage_decimals, 3) : 3;
-    const rDec  = intOr(cfg.cell_resistance_decimals, 0);
-    // Without a pack-average entity the tint would measure every cell against
-    // 0 V and paint the whole grid red; the mean of the cells is what the BMS
-    // would have reported anyway.
-    const cellV = cellRaw.filter((v) => Number.isFinite(v) && v > 0).map((v) => v * vSc);
-    const vAvgE = this._num(E.vAvg) * sSc;
-    const vAvg  = vAvgE > 0 ? vAvgE
-                : cellV.length ? cellV.reduce((a, b) => a + b, 0) / cellV.length : 0;
-    let vMin    = this._num(E.vMin)  * sSc;
-    let vMax    = this._num(E.vMax)  * sSc;
-    const vDelta= this._num(E.vDelta) * sSc;
-    let minCell = parseInt(this._state(E.minCell) || "0", 10);
-    let maxCell = parseInt(this._state(E.maxCell) || "0", 10);
-    // BMS_BLE has no cell number sensors, and older versions no min / max
-    // sensors either: take them from its cell list.
-    if (this._ble() && cellV.length) {
-      const cv = cellRaw.map((v) => (Number.isFinite(v) && v > 0 ? v * vSc : null));
-      const lo = Math.min(...cellV), hi = Math.max(...cellV);
-      if (!this._exists(E.vMin)) vMin = lo;
-      if (!this._exists(E.vMax)) vMax = hi;
-      if (!this._exists(E.minCell)) minCell = cv.indexOf(lo) + 1;
-      if (!this._exists(E.maxCell)) maxCell = cv.indexOf(hi) + 1;
+    // SOC extremes, as the cell grid marks its lowest and highest cell.
+    let minI = -1, maxI = -1;
+    if (c.highlight_soc !== false) {
+      const socs = sums.map((s) => (s && fin(s.soc) ? s.soc : null));
+      const known = socs.filter((v) => v !== null);
+      if (known.length > 1 && Math.min(...known) !== Math.max(...known)) {
+        minI = socs.indexOf(Math.min(...known));
+        maxI = socs.indexOf(Math.max(...known));
+      }
     }
-    const phase = this._state(E.phase) || "—";
-    // A templated pack may have no on/off alarm sensor, only an error text
-    // and / or a count of active alarms.
-    const alarmActive = this._on(E.alarmB) || (!!this._tmpl() && this._tmplAlarm(E));
-    // BMS_BLE has a problem sensor but no alarm text.
-    const alarm = this._state(E.alarmS) || (this._ble() && this._exists(E.alarmB) ? (alarmActive ? "Problem" : "Normal")
-      : this._tmpl() && this._exists(E.alarmS) ? "Normal" : "—");
-    const chgOn  = this._on(E.chg);
-    const dchOn  = this._on(E.dch);
-    const balAct = this._on(E.balAct);
-    const balAllow = this._on(E.balAllow);
-    const heatOn = this._on(E.heat);
-    const dry1On = this._on(E.dry1);
-    const dry2On = this._on(E.dry2);
-    // Each pill only when switched on and its entity exists: a "Heater OFF"
-    // on a BMS without a heater is misleading.
-    const showMissing = cfg.show_missing === true || cfg.show_missing === "true";
-    const shown = (eid) => showMissing || this._exists(eid);
-    // Resistance in the cell tiles: switched on, and at least one cell has a
-    // resistance sensor (or show_missing). A Seplos BMS, for one, has none.
-    let showR = cfg.show_cell_resistance !== false && cfg.show_cell_resistance !== "false" && showMissing;
-    if (!showR && cfg.show_cell_resistance !== false && cfg.show_cell_resistance !== "false") {
-      for (let n = 1; n <= this._cells() && !showR; n++) showR = this._exists(this._cellEntity("r", n));
+    this._boxes.forEach((box, i) => {
+      const s = sums[i];
+      const cls = ["box", ...(s ? this._boxState(s) : []), i === minI ? "min" : i === maxI ? "max" : "", i === this._open ? "open" : ""]
+        .filter(Boolean).join(" ");
+      if (box.className !== cls) box.className = cls;
+      const html = this._boxInner(s, this._packCfgs[i]);
+      if (html !== this._boxHtml[i]) { this._boxHtml[i] = html; box.innerHTML = html; }
+      box.style.setProperty("--soc", s && fin(s.soc) ? `${Math.max(0, Math.min(100, s.soc))}%` : "0%");
+      box.style.setProperty("--sc", s && fin(s.soc) ? socColor(s.soc) : "var(--clr-grey)");
+    });
+
+    const disp = this._incompatible ? "" : this._renderDisplay(sums);
+    if (disp !== this._dispHtml) {
+      this._dispHtml = disp;
+      this._disp.innerHTML = disp;
+      this._disp.hidden = !disp;
+      this._rack.classList.toggle("has-disp", !!disp);
     }
-    const showPill = (key, ...eids) => cfg[`show_pill_${key}`] !== false && cfg[`show_pill_${key}`] !== "false" && eids.some(shown);
-    const pills = [
-      showPill("charge", E.chg)    ? this._pill("Charge",    chgOn ? "ON" : "OFF", chgOn ? "on" : "off", E.chg) : "",
-      showPill("discharge", E.dch) ? this._pill("Discharge", dchOn ? "ON" : "OFF", dchOn ? "on" : "off", E.dch) : "",
-      showPill("balance", E.balAct, E.balAllow) ? this._pill("Balance", balAct ? "ACTIVE" : (balAllow ? "READY" : "OFF"),
-                     balAct ? "active" : (balAllow ? "on" : "off"), this._exists(E.balAct) ? E.balAct : E.balAllow) : "",
-      showPill("heater", E.heat)   ? this._pill("Heater",    heatOn ? "ON" : "OFF", heatOn ? "alert" : "off", E.heat) : "",
-      showPill("dry1", E.dry1)     ? this._pill("DRY1",      dry1On ? "ON" : "OFF", dry1On ? "on" : "off", E.dry1) : "",
-      showPill("dry2", E.dry2)     ? this._pill("DRY2",      dry2On ? "ON" : "OFF", dry2On ? "on" : "off", E.dry2) : "",
-    ].join("");
-
-    // Temperature tiles: only for sensors that actually exist in HA. An
-    // unconfigured probe (or a prefix default that matches nothing) is
-    // dropped instead of rendering as a misleading 0°.
-    const tempTiles = [
-      ["MOS", E.tMos], ["Probe 1", E.t1], ["Probe 2", E.t2], ["Probe 3", E.t3], ["Probe 4", E.t4],
-    ].filter(([, eid]) => shown(eid))
-     .map(([label, eid]) => this._tempTile(label, eid))
-     .join("");
-    // The ambient temperature is the room, not the battery: it goes next to the
-    // heading instead of into the row of battery tiles.
-    const ambient = shown(E.tAmb) ? this._tempInfo(E.tAmb) : null;
-
-    // Direction comes from the current sensor (signed) — some BMS integrations
-    // report power as unsigned magnitude, so current is the source of truth.
-    let powerDir = "idle", powerColor = "var(--clr-grey)";
-    if (curA > 0.1)  { powerDir = "charging";    powerColor = "var(--clr-green)"; }
-    if (curA < -0.1) { powerDir = "discharging"; powerColor = "var(--clr-orange)"; }
-    const socColor = soc > 50 ? "var(--clr-green)" : soc > 20 ? "var(--clr-orange)" : "var(--clr-red)";
-
-    // Stat tiles only for sensors that exist (issue #4): a BMS read over RS485
-    // via the inverter often has no cycles, phase or balance current, and an
-    // empty tile showing 0 suggests a reading that isn't there.
-    const has = shown;
-    const stats = [
-      has(E.packV)  ? this._stat("VOLTAGE", `${fmt(packV, 2)} V`, "var(--clr-amber)",  null, E.packV) : "",
-      has(E.curA)   ? this._stat("CURRENT", `${fmt(curA, 1)} A`,  "var(--clr-blue)",   null, E.curA) : "",
-      has(E.powW) || (has(E.packV) && has(E.curA))
-                    ? this._stat("POWER",   `${fmt(powW, 0)} W`,  powerColor, powerDir.toUpperCase(), has(E.powW) ? E.powW : E.curA) : "",
-      has(E.balA)   ? this._stat("BALANCE", `${fmt(balA, 2)} A`,  "var(--clr-purple)", null, E.balA) : "",
-      has(E.heatA)  ? this._stat("HEATING", `${fmt(heatA, 2)} A`, "var(--clr-orange)", null, E.heatA) : "",
-      has(E.cycles) ? this._stat("CYCLES",  cycles, "var(--clr-cyan)", null, E.cycles) : "",
-      has(E.phase)  ? this._stat("PHASE",   phase,  "var(--clr-grey)", null, E.phase) : "",
-    ].join("");
-    const html = `
-      <div class="header">
-        <div class="title">${this._esc(cfg.name)}</div>
-        <div class="hdr-r">
-          ${this._alertsHtml()}
-          <div class="alarm ${alarmActive ? "alert" : "ok"}" ${this._dataE(E.alarmB || E.alarmS)} role="button">
-            <span class="dot"></span>${this._esc(alarm)}
-          </div>
-        </div>
-      </div>
-
-      ${(cfg.show_battery || cfg.show_stats) ? `
-      <div class="hero">
-        ${cfg.show_battery ? this._renderBattery(soc, socColor,
-            shown(E.capRem) || shown(E.capTot) ? this._capacityText(E) : "",
-            shown(E.soh) ? `SOH ${Math.round(soh)}%` : "", E.soc) : ""}
-        ${cfg.show_stats && stats ? `
-          <div class="stats">${stats}</div>` : ""}
-      </div>` : ""}
-
-      ${cfg.show_pills && pills ? `
-      <div class="pills">${pills}</div>` : ""}
-
-      ${cfg.show_cells ? `
-        <div class="section-label">CELLS — voltage${showR ? " and resistance" : ""}, colour = mV from pack avg (${dev.soft}/${dev.warn}/${dev.bad})</div>
-        <div class="cells${maxRed ? " max-red" : ""}" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))};--cell-fs:${cellFontPx(cfg.cell_font_size, this._cells())}px">${this._renderCells(this._cells(), vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev, showR)}</div>` : ""}
-
-      ${cfg.show_summary ? `
-        <div class="cell-summary">
-          <span ${this._dataE(E.vMin)}><b style="color:${minClr}">${fmt(vMin, vDec)}</b> V <span class="muted">min #<span class="n">${minCell}</span></span></span>
-          <span ${this._dataE(E.vAvg)}><b>${fmt(vAvg, vDec)}</b> V <span class="muted">avg</span></span>
-          <span ${this._dataE(E.vMax)}><b style="color:${maxClr}">${fmt(vMax, vDec)}</b> V <span class="muted">max #<span class="n">${maxCell}</span></span></span>
-          <span ${this._dataE(E.vDelta)}><b class="dv" style="color:${vDelta * 1000 < dBand.warn ? "var(--clr-green)" : vDelta * 1000 < dBand.bad ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
-        </div>` : ""}
-
-      ${cfg.show_temperatures && (tempTiles || ambient) ? `
-        <div class="section-label temps-label">TEMPERATURES${ambient ? `<span class="ambient" ${this._dataE(E.tAmb)} role="button">Ambient ${ambient.shown === null ? "—" : fmt(ambient.shown, 1) + "°"}</span>` : ""}</div>
-        ${tempTiles ? `<div class="temps">${tempTiles}</div>` : ""}` : ""}
-
-      <div class="footer">
-        ${this._infoButton()}
-        <span class="runtime" ${this._dataE(E.runtime)}>Runtime ${this._esc(runtime)}</span>
-      </div>
-    `;
-    // HA hands every card a new `hass` on any state change in the whole
-    // instance, so most renders produce identical output — leave the DOM alone.
-    if (html === this._html) return;
-    this._html = html;
-    const next = document.createElement("div");
-    next.innerHTML = html;
-    patchChildren(this._root, next);
+    const head = this._renderHead(sums);
+    if (head !== this._headHtml) { this._headHtml = head; this._head.innerHTML = head; }
+    const legend = c.show_legend !== false ? this._renderLegend(sums, minI >= 0) : "";
+    if (legend !== this._legendHtml) { this._legendHtml = legend; this._legend.innerHTML = legend; }
   }
 
-  // ─── Alerts ──────────────────────────────────────────────────────────────
-  // The bell next to the alarm pill, and keeping this card's automations in
-  // line with its config. Neither for a pack drawn inside the stacked card
-  // (that card owns the alerts) nor while the card is a preview in the editor.
-  _alertsOn() {
-    const a = this._config && this._config.alerts;
-    return !!(a && a.enabled && !this._noAlerts);
-  }
-  _alertsHtml() {
-    const cfg = this._config;
-    if (!cfg.alerts || this._noAlerts) return "";
-    this._alertSync = this._alertSync || new AlertsSync(() => { this._html = null; this._queueRender(); });
-    this._alertSync.tick(this, this._hass, cfg, () => [this.alertInputs()].filter(Boolean));
-    if (!this._alertsOn()) return "";
-    const inp = this.alertInputs();
-    const status = alertStatus(cfg, [this.summary()], inp && inp.bands);
-    const st = this._alertSync.state;
-    return `<span class="bpc-bellwrap">${alertsBell(status, st, this._isAdmin())}${this._alertsOpen ? alertsPopover(status, st, cfg, (t) => this._esc(t)) : ""}</span>`;
-  }
-
-  // Clicking a templated value opens the first entity the template reads.
-  _dataE(eid) {
-    const ref = attrRef(eid);
-    if (ref) eid = ref[1];
-    if (isTpl(eid)) { const e = this._cfgTpl && this._cfgTpl.get(eid); eid = e && e.entities[0]; }
-    return eid ? `data-entity="${this._esc(eid)}"` : "";
-  }
-
-  _renderBattery(soc, color, capText, sohText, entityId) {
-    const fillH = (Math.max(0, Math.min(100, soc)) / 100) * 210;
-    const fillY = 235 - fillH;
-    const fillW = (Math.max(0, Math.min(100, soc)) / 100) * 270;   // horizontal variant
-    // Unique per card so two packs on one dashboard don't share a gradient, but
-    // stable across renders so unchanged state produces unchanged markup.
-    this._gid = this._gid || `g_${Math.random().toString(36).slice(2, 8)}`;
-    const gid = this._gid;
-    return `
-      <svg class="battery" viewBox="0 0 130 260" preserveAspectRatio="xMidYMid meet" ${this._dataE(entityId)} aria-hidden="true">
-        <defs>
-          <linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0" stop-color="${color}" stop-opacity="1"/>
-            <stop offset="1" stop-color="${color}" stop-opacity="0.55"/>
-          </linearGradient>
-        </defs>
-        <rect x="45" y="0"  width="40"  height="14"  rx="3"  fill="rgba(255,255,255,0.35)"/>
-        <rect x="5"  y="18" width="120" height="232" rx="10" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.3)" stroke-width="2.5"/>
-        <rect x="11" y="${fillY}" width="108" height="${fillH}" rx="5" fill="url(#${gid})"/>
-        <text x="65" y="130" text-anchor="middle" fill="#fff" font-size="36" font-weight="700">${Math.round(soc)}%</text>
-        <text x="65" y="155" text-anchor="middle" fill="rgba(255,255,255,0.85)" font-size="11">${this._esc(capText)}</text>
-        <text x="65" y="172" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="11">${this._esc(sohText)}</text>
-      </svg>
-      <svg class="battery-h" viewBox="0 0 300 76" preserveAspectRatio="xMidYMid meet" ${this._dataE(entityId)} aria-hidden="true">
-        <defs>
-          <linearGradient id="${gid}_h" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0" stop-color="${color}" stop-opacity="1"/>
-            <stop offset="1" stop-color="${color}" stop-opacity="0.55"/>
-          </linearGradient>
-        </defs>
-        <rect x="2" y="2" width="282" height="72" rx="10" style="fill:rgba(255,255,255,0.04);stroke:var(--primary-text-color,#fff);stroke-opacity:0.3" stroke-width="2.5"/>
-        <rect x="287" y="24" width="11" height="28" rx="3" style="fill:var(--primary-text-color,#fff);fill-opacity:0.35"/>
-        <rect x="8" y="8" width="${fillW}" height="60" rx="5" fill="url(#${gid}_h)"/>
-        <text x="20" y="49" style="fill:var(--primary-text-color,#fff)" font-size="30" font-weight="700">${Math.round(soc)}%</text>
-        <text x="272" y="33" text-anchor="end" style="fill:var(--primary-text-color,#fff);fill-opacity:0.85" font-size="12">${this._esc(capText)}</text>
-        <text x="272" y="51" text-anchor="end" style="fill:var(--primary-text-color,#fff);fill-opacity:0.65" font-size="12">${this._esc(sohText)}</text>
-      </svg>
-    `;
-  }
-
-  _stat(label, value, color, sub, entityId) {
-    return `
-      <div class="stat" style="border-left-color:${color};" ${this._dataE(entityId)} role="button">
-        <div class="stat-label">${label}${sub ? ` · <span class="muted">${this._esc(sub)}</span>` : ""}</div>
-        <div class="stat-value" title="${this._esc(value)}">${this._esc(value)}</div>
-      </div>
-    `;
-  }
-
-  _pill(label, value, status, entityId) {
-    return `<span class="pill pill-${status}" ${this._dataE(entityId)} role="button">${this._esc(label)} <b>${this._esc(value)}</b></span>`;
-  }
-
-  _renderCells(N, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev, showR = true) {
-    let out = "";
-    for (let n = 1; n <= N; n++) {
-      const ev = this._cellEntity("v", n);
-      const er = this._cellEntity("r", n);
-      const et = this._cellEntity("t", n);   // shared module temperature
-      const v = this._num(ev) * vSc;       // → volts
-      const r = this._num(er) * rSc;       // → ohms
-      const devMv = Math.round(Math.abs(v - vAvg) * 1e6) / 1000; // mV, rounded to 1 µV
-      let cls = "ok";
-      if (devMv > dev.bad) cls = "bad";
-      else if (devMv > dev.warn) cls = "warn";
-      else if (devMv > dev.soft) cls = "soft";
-      const tag = n === maxCell ? "max" : n === minCell ? "min" : "";
-      out += `
-        <div class="cell ${cls} ${tag}" ${this._dataE(ev)} role="button">
-          <div class="cell-n">#${n}</div>
-          <div class="cell-v">${fmt(v, vDec)}</div>
-          ${showR ? `<div class="cell-r">${fmt(r * 1000, rDec)} mΩ</div>` : ""}
-          ${et && this._exists(et) ? this._cellTemp(et) : ""}
-        </div>
-      `;
-    }
+  _boxState(s) {
+    const out = [];
+    if (s.alarm) out.push("alarm");
+    else if (s.deltaState === "bad") out.push("d-bad");
+    else if (s.deltaState === "warn") out.push("d-warn");
+    if (s.charge === false && s.discharge === false) out.push("idle");
     return out;
   }
 
-  // In the card's temperature_unit, like the temperature tiles.
-  _cellTemp(entityId) {
-    const { shown } = this._tempInfo(entityId);
-    return `<div class="cell-t">${shown === null ? "—" : fmt(shown, 0) + "°"}</div>`;
-  }
-
-  _tempTile(label, entityId) {
-    const { shown, color } = this._tempInfo(entityId);
+  _boxInner(s, p) {
+    if (!s) return `<span class="screen"><span class="scr-big">…</span></span>`;
+    const big = s.soc !== null ? `${fmt(s.soc, 0)}%` : s.voltage !== null ? `${fmt(s.voltage, 1)}<small>V</small>` : "—";
+    const line1 = [
+      s.soc !== null && s.voltage !== null ? `${fmt(s.voltage, 1)}<span class="u">V</span>` : "",
+      s.current !== null ? `${fmt(s.current, 1, true)}<span class="u">A</span>` : "",
+    ].filter(Boolean).join(" ");
+    const line2 = [
+      s.deltaMv !== null ? `Δ${fmt(s.deltaMv, 0)}<span class="u">mV</span>` : "",
+      s.temp ? `${fmt(s.temp.shown, 0)}<span class="u">°</span>` : "",
+    ].filter(Boolean).join(" ");
+    const known = s.charge !== null || s.discharge !== null;
+    const run = known ? !!(s.charge || s.discharge) : s.soc !== null || s.voltage !== null;
     return `
-      <div class="temp" ${this._dataE(entityId)} role="button">
-        <div class="temp-label">${this._esc(label)}</div>
-        <div class="temp-val" style="color:${color};">${shown === null ? "—" : fmt(shown, 1) + "°"}</div>
-      </div>
-    `;
+      <span class="term neg"></span><span class="term pos"></span>
+      <span class="sign neg">−</span><span class="sign pos">+</span>
+      <span class="breaker"></span>
+      <span class="screen">
+        <span class="scr-big">${big}</span>
+        ${s.soc !== null ? `<span class="scr-bar"><i></i></span>` : ""}
+        ${line1 ? `<span class="scr-line">${line1}</span>` : ""}
+        ${line2 ? `<span class="scr-line">${line2}</span>` : ""}
+      </span>
+      <span class="plabel">${esc(p.name)}</span>
+      <span class="pfoot">
+        <span class="leds"><span><i class="run${run ? " on" : ""}"></i>RUN</span><span><i class="alm${s.alarm ? " on" : ""}"></i>ALM</span></span>
+        <span class="ports"><i class="dry"></i><i></i><i></i></span>
+      </span>`;
   }
 
-  // A temperature in the unit the card shows, plus its band colour.
-  _tempInfo(entityId) {
-    // Entity exists but is unavailable/unknown → show a dash, not 0°.
-    const raw = parseFloat(this._state(entityId));
-    const val = Number.isFinite(raw) ? raw : null;
-    // Work in °C for the colour bands; a template's result is taken to be in
-    // HA's own unit, since that's what states() returns for converted sensors.
-    const ref = attrRef(entityId);
-    const unit = ref ? "°C" : isTpl(entityId)
-      ? this._hass?.config?.unit_system?.temperature
-      : this._hass?.states[entityId]?.attributes?.unit_of_measurement;
-    const c = val === null ? null : isFahrenheit(unit) ? (val - 32) * 5 / 9 : val;
-    let want = String(this._config.temperature_unit || "auto").toUpperCase();
-    if (ref && want === "AUTO") want = isFahrenheit(this._hass?.config?.unit_system?.temperature) ? "F" : "C";
-    const shown = c === null ? null : want === "F" ? c * 9 / 5 + 32 : want === "C" ? c : val;
-    // Bands are set in the unit the card shows: the chosen one, or on "auto"
-    // Home Assistant's own (what the user sees everywhere else).
-    const inF = want === "F" || (want !== "C" && isFahrenheit(this._hass?.config?.unit_system?.temperature));
-    const toBand = (x) => (inF ? x * 9 / 5 + 32 : x);
-    const [cold, warm, hot] = [
-      numOrAny(this._config.temp_cold, toBand(5)),
-      numOrAny(this._config.temp_warm, toBand(35)),
-      numOrAny(this._config.temp_hot,  toBand(50)),
-    ].sort((a, b) => a - b);
-    const t = c === null ? null : toBand(c);
-    const color = t === null ? "inherit"
-                : t < cold ? "var(--clr-blue)"
-                : t < warm ? "var(--clr-green)"
-                : t < hot  ? "var(--clr-amber)"
-                :            "var(--clr-red)";
-    return { shown, color };
+  // Alerts: the stacked card owns them for all of its packs (the pack cards
+  // it draws don't), using the pack card's alerts module.
+  _alertsHtml(sums) {
+    const c = this._config;
+    const Pack = customElements.get("battery-pack-card");
+    const A = Pack && Pack.alerts;
+    if (!A || !c.alerts || this._incompatible) return "";
+    if (!this._alertsCss) {
+      this._alertsCss = true;
+      const st = document.createElement("style");
+      st.textContent = A.css;
+      this.shadowRoot.appendChild(st);
+    }
+    this._alertSync = this._alertSync || new A.Sync(() => { this._headHtml = null; this._queue(); });
+    this._alertSync.tick(this, this._hass, c, () => (this._sources || []).map((s) => s.alertInputs()).filter(Boolean));
+    if (!c.alerts.enabled) return "";
+    const first = this._sources && this._sources[0] && this._sources[0].alertInputs();
+    const status = A.status(c, sums, first && first.bands);
+    const admin = this._hass && this._hass.user && this._hass.user.is_admin === true;
+    const st = this._alertSync.state;
+    return `<span class="bpc-bellwrap">${A.bell(status, st, admin)}${this._alertsOpen ? A.popover(status, st, c, esc) : ""}</span>`;
   }
 
-  _esc(s) {
-    if (s === null || s === undefined) return "";
-    return String(s).replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
-  }
-
-  _css() {
+  _renderHead(sums) {
+    const c = this._config;
+    const watched = sums.filter((s) => s && s.alarm !== null);
+    const alarms = watched.filter((s) => s.alarm).length;
+    const pill = watched.length
+      ? `<div class="alarm ${alarms ? "alert" : "ok"}"><span class="dot"></span>${alarms ? `${alarms} pack${alarms > 1 ? "s" : ""} in alarm` : "All packs normal"}</div>`
+      : "";
     return `
-      :host {
-        display: block;
-        --clr-green:  #4caf50; --clr-amber:  #ffc107; --clr-orange: #ff9800;
-        --clr-red:    #ef5350; --clr-blue:   #42a5f5; --clr-cyan:   #00bcd4;
-        --clr-purple: #ab47bc; --clr-grey:   #9e9e9e;
-      }
-      ha-card { display: block; padding: 18px 18px 14px; }
-      /* Layout follows the card's own width, not the viewport: in a horizontal
-         stack a wide screen can still give each card a narrow column. */
-      #body { display: flex; flex-direction: column; gap: 12px; container-type: inline-size; }
-      [data-entity] { cursor: pointer; }
-      [data-entity]:focus-visible { outline: 2px solid var(--clr-blue); outline-offset: 2px; }
+      <div class="s-head"><div class="s-title">${esc(c.name)}</div><div class="s-hr">${this._alertsHtml(sums)}${pill}</div></div>
+      ${this._incompatible ? `<div class="empty warn">An older Battery Pack Card is loaded in this browser, from a second dashboard resource or bundled with an integration, and the stacked card needs v${VERSION} or newer. Remove the extra copy so only the HACS one loads, then reload.</div>` : ""}
+      ${this._packCfgs.length || this._dispHtml ? "" : `<div class="empty">No packs yet. Add them in the card editor, or under <code>packs:</code> in YAML.</div>`}`;
+  }
 
-      .header { display:flex; justify-content:space-between; align-items:center; gap: 12px; }
-      .hdr-r  { display:flex; align-items:center; gap: 4px; }
-      ${ALERTS_CSS}
-      .title  { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
-      .alarm  { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:500; padding:4px 12px; border-radius:14px; }
-      .alarm.ok    { color: var(--clr-green); background: rgba(76,175,80,0.13); }
-      .alarm.alert { color: var(--clr-red);   background: rgba(239,83,80,0.18); }
-      .alarm .dot  { width:8px; height:8px; border-radius:50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+  // The bank display: a JK BMS-style screen in a bezel on top of the cabinet.
+  // Each value comes from its bank setting (entity or template) when set,
+  // otherwise from the packs where that adds up: voltage = the packs' mean
+  // (they're in parallel), current and capacities = their sum, SOC = weighted
+  // by capacity, cells / temperature = the extremes over all packs.
+  _renderDisplay(sums) {
+    const c = this._config;
+    if (c.show_bank_display === false) return "";
+    const st = (this._hass && this._hass.states) || {};
+    const packs = sums.filter(Boolean);
+    const T = {};
+    const inv = c.invert_current === true || c.invert_current === "true";
+    for (const [key] of TOTALS) {
+      const t = this._total(c[key], st);
+      if (!t) continue;
+      let n = t.text === null ? parseFloat(t.value) : NaN;
+      if (key === "entity_power" && Number.isFinite(n)) n *= /^kW$/i.test(t.unit || "") ? 1000 : /^MW$/i.test(t.unit || "") ? 1e6 : 1;
+      if ((key === "entity_current" || key === "entity_power") && inv) n = -n;
+      T[key] = { ...t, n };
+    }
+    if (!packs.length && !Object.keys(T).length && !EXTRAS.some(([k]) => c[k])) return "";
+    const vals = (k) => packs.map((p) => p[k]).filter(fin);
+    const sum = (k) => { const v = vals(k); return v.length ? v.reduce((a, b) => a + b, 0) : null; };
+    const mean = (k) => { const v = vals(k); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+    const pick = (key, derived) => (T[key] ? T[key] : derived !== null && derived !== undefined && Number.isFinite(derived) ? { n: derived, text: null } : null);
 
-      .hero  { display:flex; gap: 16px; align-items: stretch; }
-      .battery { flex: 0 0 130px; height: 250px; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.25)); }
-      .stats { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start; }
-      .stat  { padding: 8px 12px; background: rgba(255,255,255,0.035); border-left: 3px solid var(--clr-grey); border-radius: 7px; }
-      .stat:hover { background: rgba(255,255,255,0.07); }
-      .stat-label { font-size: 10px; letter-spacing: 1.2px; opacity: 0.7; }
-      .stat-value { font-size: 18px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
-      /* Tiles may shrink below their text rather than push past the card edge
-         (issue #6). Labels wrap as before; a value that still doesn't fit is
-         cut with an ellipsis instead of breaking over two lines. */
-      .stats, .stat { min-width: 0; }
-      .stat-label { overflow-wrap: anywhere; }
-      .stat-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    const capTot = sum("capacityTotal"), capRemSum = sum("capacityRemaining");
+    // Capacity as energy (kWh): each pack's Ah × its nominal voltage. A bank
+    // entity in Ah gets the packs' mean nominal voltage; one in Wh / kWh is
+    // energy already.
+    const kwh = c.capacity_unit === "kWh";
+    const V = pick("entity_voltage", mean("voltage"));
+    const nvSet = parseFloat(c.nominal_voltage);
+    const nomV = nvSet > 0 ? nvSet : mean("nominalVoltage") || (V && V.text === null && Number.isFinite(V.n) ? V.n : null);
+    const toKwh = (t) => {
+      if (!t || t.text !== null || !Number.isFinite(t.n)) return t;
+      const u = String(t.unit || "").trim();
+      const n = /^kWh$/i.test(u) ? t.n : /^Wh$/i.test(u) ? t.n / 1000 : nomV ? (t.n * nomV) / 1000 : NaN;
+      return { ...t, n };
+    };
+    const A = pick("entity_current", sum("current"));
+    const socDerived = capTot && capRemSum !== null ? (capRemSum / capTot) * 100 : mean("soc");
+    const SOC = pick("entity_soc", socDerived);
+    const REM = kwh ? (T.entity_capacity_remaining ? toKwh(T.entity_capacity_remaining) : pick("", sum("energyRemaining")))
+                    : pick("entity_capacity_remaining", capRemSum);
+    const CAP = kwh ? (T.entity_capacity_total ? toKwh(T.entity_capacity_total) : pick("", sum("energyTotal")))
+                    : pick("entity_capacity_total", capTot);
+    const capUnit = kwh ? "kWh" : "Ah";
+    const vxa = V && A && Number.isFinite(V.n) && Number.isFinite(A.n) && V.text === null && A.text === null ? V.n * A.n : null;
+    const PWR = pick("entity_power", vxa !== null ? vxa : sum("power"));
+    // Extra display entities, set: they win over what the packs give.
+    const X = {};
+    for (const [key] of EXTRAS) { const t = this._total(c[key], st); if (t) X[key] = t; }
+    const xNum = (key) => { const t = X[key]; const n = t && t.text === null ? parseFloat(t.value) : NaN; return Number.isFinite(n) ? n : null; };
+    const xState = (key) => { const t = X[key]; return t ? (t.text !== null ? t.text : t.value) : undefined; };
+    const cellV = (n) => (n === null ? null : n > 100 ? n / 1000 : n);   // mV sensors read as V
+    const cellMax = X.entity_cell_max ? cellV(xNum("entity_cell_max")) : vals("cellMax").length ? Math.max(...vals("cellMax")) : null;
+    const cellMin = X.entity_cell_min ? cellV(xNum("entity_cell_min")) : vals("cellMin").length ? Math.min(...vals("cellMin")) : null;
+    const temps = packs.map((p) => p.temp && p.temp.shown).filter(fin);
+    const temp = X.entity_temperature ? xNum("entity_temperature") : temps.length ? Math.max(...temps) : null;
+    const watchedPacks = packs.filter((p) => p.alarm !== null);
+    const watched = X.entity_alarm ? [true] : watchedPacks;
+    const alarms = X.entity_alarm ? (isOn(xState("entity_alarm"), true) ? 1 : 0) : watchedPacks.filter((p) => p.alarm).length;
+    const alarmText = X.entity_alarm ? "Alarm" : alarms === 1 ? "1 pack" : `${alarms} packs`;
+    const sw = (k) => {
+      const key = k === "charge" ? "entity_charge" : "entity_discharge";
+      if (X[key]) return isOn(xState(key)) ? ["ON", ""] : ["OFF", "red"];
+      const known = packs.filter((p) => p[k] !== null);
+      if (!known.length) return null;
+      const on = known.filter((p) => p[k]).length;
+      return on === known.length ? ["ON", ""] : on === 0 ? ["OFF", "red"] : [`${on}/${known.length}`, "amber"];
+    };
+    const chg = sw("charge"), dch = sw("discharge");
+    const packCount = X.entity_pack_count ? xNum("entity_pack_count") : this._packCfgs.length || null;
 
-      .battery-h { display: none; }
-      /* Too narrow for battery + two stat columns side by side (130 + 16 + two
-         tiles wide enough for values like "-150.2 A"): lay the battery down as a
-         full-width bar above the stats. Same height either way (~250px). */
-      @container (max-width: 380px) {
-        .hero { flex-direction: column; gap: 10px; }
-        .battery { display: none; }
-        .battery-h { display: block; width: 100%; height: auto; filter: drop-shadow(0 3px 8px rgba(0,0,0,0.2)); }
-      }
+    const attrs = (t) => `${t && t.entity ? ` data-entity="${esc(t.entity)}" role="button"` : ""}${t && t.error ? ` title="${esc(t.error)}"` : ""}`;
+    const show = (t, d, unit, scale = 1) => (t.text !== null ? esc(t.text) : `${fmt(Number.isFinite(t.n) ? t.n / scale : NaN, d)}${unit}`);
+    const item = (label, html, t, cls = "") => (html === null ? "" : `<span${attrs(t)}>${label}<span class="v ${cls}">${html}</span></span>`);
+    // Power in kW with 2 decimals, in whole watts, or ("auto") in watts while
+    // it rounds to under 1 kW, so a small system reads 85 W instead of 0.08 kW.
+    const pu = c.power_unit;
+    const pwrW = !!PWR && (pu === "W" || (pu === "auto" && PWR.text === null && Number.isFinite(PWR.n) && Math.round(Math.abs(PWR.n)) < 1000));
+    const pwrUnit = pwrW ? "W" : "kW";
+    const pwrShow = (unit) => show(PWR, pwrW ? 0 : 2, unit, pwrW ? 1 : 1000);
 
-      .pills { display:flex; flex-wrap:wrap; gap: 6px; }
-      .pill  { padding: 5px 11px; border-radius: 14px; font-size: 12px; font-weight: 500; letter-spacing: 0.2px; }
-      .pill:hover { filter: brightness(1.15); }
-      .pill b { margin-left: 4px; font-weight: 700; }
-      .pill-on     { color: var(--clr-green);  background: rgba(76,175,80,0.13); }
-      .pill-off    { color: var(--clr-grey);   background: rgba(158,158,158,0.10); }
-      .pill-active { color: #fff;              background: var(--clr-purple); box-shadow: 0 0 10px rgba(171,71,188,0.5); }
-      .pill-alert  { color: var(--clr-red);    background: rgba(239,83,80,0.15); }
+    const socN = SOC && SOC.text === null && Number.isFinite(SOC.n) ? Math.max(0, Math.min(100, SOC.n)) : null;
+    const top = [
+      V ? `<span${attrs(V)}><span class="ico">V</span>Vtg.: <span class="v big">${show(V, 2, "V")}</span></span>` : "",
+      A ? `<span${attrs(A)}><span class="ico">A</span>Cur.: <span class="v big">${show(A, 1, "A")}</span></span>` : "",
+    ].join("");
+    const capDec = (n) => (Math.abs(n) >= 100 ? 0 : 1);
+    const mid = [
+      SOC ? `<div class="ring"${attrs(SOC)}><span class="arc" style="background:${socN === null ? "#1c1c1c" : ringGradient(socN)}"></span><span class="pct">${SOC.text !== null ? esc(SOC.text) : `${fmt(socN === null ? NaN : socN, 0)}%`}</span></div>` : "",
+      CAP ? `<div class="cap"${attrs(CAP)}><span class="v">${CAP.text !== null ? esc(CAP.text) : fmt(CAP.n, capDec(CAP.n || 0))}</span><span class="k">Bat-Capacity(${capUnit})</span></div>` : "",
+      REM ? `<div class="cap"${attrs(REM)}><span class="v">${REM.text !== null ? esc(REM.text) : fmt(REM.n, capDec(REM.n || 0))}</span><span class="k">Rem-Capacity(${capUnit})</span></div>` : "",
+    ].join("");
+    const col = (a, b) => (a || b ? `<div class="col">${a}${b}</div>` : "");
+    const bot = [
+      col(item("Max.Cell:", cellMax === null ? null : `${fmt(cellMax, 3)}V`, X.entity_cell_max), item("Min.Cell:", cellMin === null ? null : `${fmt(cellMin, 3)}V`, X.entity_cell_min)),
+      col(item("Temp:", temp === null ? null : `${fmt(temp, 0)}°`, X.entity_temperature), PWR ? item(`Pwr(${pwrUnit}):`, pwrShow(""), PWR) : ""),
+      col(watched.length ? item("Alarm:", alarms ? "Alarm" : "Normal", X.entity_alarm, alarms ? "red" : "") : "", packCount ? item("Packs:", fmt(packCount, 0), X.entity_pack_count) : ""),
+      col(chg ? item("CHG:", chg[0], X.entity_charge, chg[1]) : "", dch ? item("DCH:", dch[0], X.entity_discharge, dch[1]) : ""),
+    ].filter(Boolean);
+    if (!top && !mid && !bot.length) return "";
+    if (c.bank_display_size === "compact") {
+      // Always the same shape: the SOC ring on the left, the four headline
+      // figures 2 × 2 on the right as "Vtg: 53.39V", all scaling with the
+      // display's width; an alarm gets its own line underneath.
+      const cell = (label, html, t) => (html === null ? "" : `<span class="c"${attrs(t)}><span class="k">${label}:</span><span class="v">${html}</span></span>`);
+      const cells = [
+        V ? cell("Vtg", show(V, 2, "V"), V) : "",
+        A ? cell("Cur", show(A, 1, "A"), A) : "",
+        PWR ? cell("Pwr", pwrShow(pwrUnit), PWR) : "",
+        REM ? cell("Rem", REM.text !== null ? esc(REM.text) : `${fmt(REM.n, capDec(REM.n || 0))}${capUnit}`, REM) : "",
+      ].join("");
+      return `<div class="jk compact">
+        ${SOC ? `<div class="ring sm"${attrs(SOC)}><span class="arc" style="background:${socN === null ? "#1c1c1c" : ringGradient(socN)}"></span><span class="pct">${SOC.text !== null ? esc(SOC.text) : `${fmt(socN === null ? NaN : socN, 0)}%`}</span></div>` : ""}
+        ${cells ? `<div class="grid4">${cells}</div>` : ""}
+        ${alarms ? `<div class="alarmline"${attrs(X.entity_alarm)}>Alarm: <span class="v red">${esc(alarmText)}</span></div>` : ""}
+      </div>`;
+    }
+    return `<div class="jk">
+      ${top ? `<div class="top">${top}</div>` : ""}
+      ${mid ? `<div class="mid">${mid}</div>` : ""}
+      ${bot.length ? `<div class="bot" style="--cols:${bot.length}">${bot.join("")}</div>` : ""}
+    </div>`;
+  }
 
-      .section-label { font-size: 10px; letter-spacing: 1.5px; opacity: 0.55; margin-top: 4px; }
-      .temps-label { display: flex; justify-content: space-between; gap: 8px; }
-      .temps-label .ambient { letter-spacing: 0; cursor: pointer; }
+  // One bank total: an entity's state, or a template's rendered result. A
+  // plain number is formatted with its unit and decimals; anything
+  // else a template returns (say "1,234 Ah") is shown as it is. null = no tile.
+  _total(setting, st) {
+    if (!setting) return null;
+    if (isTpl(setting)) {
+      const e = this._tpl && this._tpl.get(setting);
+      const r = e && !e.error ? e.result : undefined;
+      const entity = (e && e.entities[0]) || null;
+      if (r === undefined || r === null) return { value: NaN, text: null, unit: "", entity, error: e && e.error };
+      const str = typeof r === "object" ? JSON.stringify(r) : String(r).trim();
+      const numeric = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(str);
+      return { value: numeric ? str : NaN, text: numeric ? null : str, unit: "", entity, error: null };
+    }
+    const e = st[setting];
+    if (!e) return null;
+    return { value: e.state, text: null, unit: e.attributes && e.attributes.unit_of_measurement, entity: setting, error: null };
+  }
 
-      .cells {
-        display: grid;
-        /* Never more than --cell-max-cols per row (so 8/16/24-cell packs keep
-           their familiar rows on wide cards); wrap to fewer columns when a
-           column would drop below --cell-min-w. The 0.1px keeps the
-           max-column case from rounding down to one column fewer. */
-        --cell-gap: 5px;
-        grid-template-columns: repeat(
-          auto-fit,
-          minmax(
-            max(var(--cell-min-w, 48px),
-                calc((100% - (var(--cell-max-cols, 8) - 1) * var(--cell-gap)) / var(--cell-max-cols, 8) - 0.1px)),
-            1fr));
-        gap: var(--cell-gap);
-      }
-      .cell  {
-        position: relative; padding: 8px 4px 6px; text-align: center;
-        background: rgba(76,175,80,0.18); border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 7px;
-      }
-      .cell::before, .cell::after {
-        content: ""; position: absolute; top: -3px; width: 12%; height: 4px;
-        background: rgba(255,255,255,0.4); border-radius: 1.5px 1.5px 0 0;
-      }
-      .cell::before { left: 28%; }
-      .cell::after  { right: 28%; }
-      .cell:hover { filter: brightness(1.15); }
-      .cell.soft { background: rgba(255,193,7,0.18); }
-      .cell.warn { background: rgba(255,152,0,0.22); }
-      .cell.bad  { background: rgba(239,83,80,0.28); }
-      .cell.min  { border: 2px solid var(--clr-red);   box-shadow: 0 0 12px rgba(239,83,80,0.4); }
-      .cell.max  { border: 2px solid var(--clr-green); box-shadow: 0 0 12px rgba(76,175,80,0.4); }
-      .max-red .cell.min { border-color: var(--clr-green); box-shadow: 0 0 12px rgba(76,175,80,0.4); }
-      .max-red .cell.max { border-color: var(--clr-red);   box-shadow: 0 0 12px rgba(239,83,80,0.4); }
-      .cell-n { font-size: 9px; opacity: 0.55; line-height: 1; }
-      .cell-v { font-size: var(--cell-fs, 14px); font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; white-space: nowrap; }
-      .cell-r { font-size: 9px; opacity: 0.55; line-height: 1; }
-      .cell-t { font-size: calc(var(--cell-fs, 14px) * 0.78); opacity: 0.7; line-height: 1.15; }
+  _renderLegend(sums, extremes) {
+    const first = sums.find(Boolean);
+    if (!first) return "";
+    const c0 = this._packCfgs[0] || {};
+    const warn = Number(c0.delta_warn) || 5, bad = Number(c0.delta_bad) || 15;
+    const [w, b] = [warn, bad].sort((x, y) => x - y);
+    const anyDelta = sums.some((s) => s && s.deltaMv !== null);
+    const anyAlarm = sums.some((s) => s && s.alarm !== null);
+    return `<div class="legend">
+      ${anyDelta ? `<span><b class="sw ok"></b>ok</span><span><b class="sw d-warn"></b>Δ ≥ ${w} mV</span><span><b class="sw d-bad"></b>Δ ≥ ${b} mV</span>` : ""}
+      ${anyAlarm ? `<span><b class="sw alarm"></b>alarm</span>` : ""}
+      ${extremes ? `<span><b class="sw min"></b>lowest SOC</span><span><b class="sw max"></b>highest SOC</span>` : ""}
+    </div>`;
+  }
 
-      /* A fixed grid, not a wrapping line: whether Δ fitted on the first line
-         used to depend on the values ("min #3" vs "min #10"), so the line
-         count flipped as cells changed and everything below jumped (issue
-         #10). Now the layout depends only on the card width: four columns,
-         or 2×2 when the widest possible values wouldn't fit. */
-      .cell-summary {
-        display: grid; grid-template-columns: repeat(4, auto); justify-content: space-between;
-        gap: 6px; font-size: 12px; padding: 4px 2px 0; font-variant-numeric: tabular-nums;
-      }
-      .cell-summary > span { white-space: nowrap; }
-      .cell-summary .muted { opacity: 0.5; margin-left: 3px; }
-      .cell-summary span { padding: 2px 6px; border-radius: 4px; }
-      .cell-summary > span:hover { background: rgba(255,255,255,0.04); }
-      /* Room for two digits either way, so #3 → #10 or 9 → 23 mV moves nothing. */
-      .cell-summary .n  { padding: 0; display: inline-block; min-width: 2ch; }
-      .cell-summary .dv { display: inline-block; min-width: 2ch; text-align: right; }
-      @container (max-width: 456px) {
-        .cell-summary { grid-template-columns: repeat(2, auto); }
-      }
-      @container (max-width: 236px) {
-        .cell-summary { grid-template-columns: auto; justify-content: start; }
-      }
+  // ─── Detail ─────────────────────────────────────────────────────────────
 
-      .temps { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 5px; }
-      .temp  { padding: 8px 6px; background: rgba(255,255,255,0.03); border-radius: 7px; text-align: center; }
-      .temp:hover { background: rgba(255,255,255,0.07); }
-      .temp-label { font-size: 10px; opacity: 0.6; letter-spacing: 0.5px; }
-      .temp-val   { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  _makeDetail(i) {
+    const card = document.createElement("battery-pack-card");
+    card._noAlerts = true;
+    card.setConfig(this._packCfgs[i]);
+    if (this._hass) card.hass = this._hass;
+    this._detailCard = card;
+    return card;
+  }
 
-      .muted { opacity: 0.55; }
-      .footer { display: flex; align-items: center; gap: 8px; font-size: 10px; min-height: 16px; }
-      .footer .runtime { opacity: 0.4; margin-left: auto; }
-      .info-toggle {
-        font: inherit; font-size: 11px; font-weight: 500; letter-spacing: 0.3px;
-        color: var(--primary-color, #03a9f4); background: none; border: 0; padding: 4px 0; cursor: pointer;
-      }
-      .info-toggle:hover { text-decoration: underline; }
+  _dropDetail() {
+    this._detailCard = null;
+    if (this._detail) { this._detail.classList.remove("open"); this._detail.firstElementChild.innerHTML = ""; }
+    const body = this.shadowRoot && this.shadowRoot.getElementById("dlg-body");
+    if (body) body.innerHTML = "";
+  }
 
-      #info { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127,127,127,0.22); container-type: inline-size; }
-      .info-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-      .info-head .section-label { margin: 0; }
-      .info-status { margin-left: auto; font-size: 10px; opacity: 0.55; }
-      .info-status.err { color: var(--clr-red); opacity: 1; }
-      .info-btn {
-        font: inherit; font-size: 11px; font-weight: 500; padding: 4px 10px; border-radius: 12px; cursor: pointer;
-        color: inherit; background: rgba(127,127,127,0.14); border: 1px solid rgba(127,127,127,0.25);
-      }
-      .info-head .info-btn:first-of-type:not(.primary) { margin-left: auto; }
-      .info-btn.primary { color: #fff; background: var(--primary-color, #03a9f4); border-color: transparent; }
-      .info-btn.add { margin-top: 8px; }
-      .info-list { display: grid; grid-template-columns: fit-content(45%) 1fr; gap: 5px 14px; margin: 0; font-size: 12px; }
-      .info-list dt { opacity: 0.6; overflow-wrap: anywhere; }
-      .info-list dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
-      .info-empty { font-size: 12px; opacity: 0.6; }
-      .info-rows { display: flex; flex-direction: column; gap: 6px; }
-      .info-row {
-        display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.3fr) auto;
-        grid-template-areas: "drag k v del"; gap: 6px; align-items: center;
-        border-radius: 7px;
-      }
-      .info-row.dragging { opacity: 0.6; background: rgba(127,127,127,0.12); }
-      .info-row .drag { grid-area: drag; }
-      .info-row .k { grid-area: k; }
-      .info-row .v { grid-area: v; }
-      .info-row .del { grid-area: del; }
-      .info-row input {
-        min-width: 0; font: inherit; font-size: 12px; color: inherit; padding: 6px 8px; border-radius: 6px;
-        background: rgba(127,127,127,0.10); border: 1px solid rgba(127,127,127,0.28);
-      }
-      .info-row input:focus { outline: 2px solid var(--primary-color, #03a9f4); outline-offset: -1px; }
-      .info-row .drag, .info-row .del {
-        font: inherit; font-size: 13px; line-height: 1; color: inherit; opacity: 0.6; cursor: pointer;
-        background: none; border: 0; padding: 6px 4px; border-radius: 5px;
-      }
-      .info-row .drag { cursor: grab; touch-action: none; letter-spacing: -2px; }
-      .info-row .drag:hover, .info-row .del:hover, .info-row .drag:focus-visible { opacity: 1; background: rgba(127,127,127,0.15); }
-      .info-row .preview { grid-column: 2 / 4; order: 1; font-size: 11px; opacity: 0.75; padding: 0 2px 2px; overflow-wrap: anywhere; }
-      .info-row .preview::before { content: "→ "; opacity: 0.6; }
-      .tpl-err { color: var(--clr-red); }
-      .info-row .ac {
-        grid-column: 2 / 4; order: 2; display: flex; flex-direction: column; overflow: hidden;
-        border: 1px solid rgba(127,127,127,0.3); border-radius: 7px; background: rgba(127,127,127,0.08);
-      }
-      .ac-item { display: flex; gap: 10px; align-items: baseline; padding: 6px 9px; cursor: pointer; font-size: 12px; min-width: 0; }
-      .ac-item.on, .ac-item:hover { background: rgba(127,127,127,0.2); }
-      .ac-main { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .ac-sub { margin-left: auto; opacity: 0.6; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-      /* Narrow card: label above value so both stay readable. */
-      @container (max-width: 330px) {
-        .info-row { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "drag k del" "drag v del"; }
-        .info-row .preview, .info-row .ac { grid-column: 2 / 3; }
-      }
-    `;
+  _markOpen() {
+    (this._boxes || []).forEach((b, i) => {
+      b.classList.toggle("open", i === this._open);
+      b.setAttribute("aria-expanded", String(i === this._open));
+    });
+  }
+
+  // One detail row for the whole grid, slotted (CSS order) right after the
+  // last box of the tapped box's row, so it opens underneath that row.
+  _placeDetail() {
+    if (this._open < 0 || !this._detail) return;
+    const cols = getComputedStyle(this._cab).gridTemplateColumns.split(" ").filter(Boolean).length || 1;
+    const rowEnd = Math.min(this._boxes.length - 1, Math.floor(this._open / cols) * cols + cols - 1);
+    this._detail.style.order = String(rowEnd * 2 + 1);
+  }
+
+  _toggleInline(i) {
+    if (this._open === i) {
+      this._open = -1;
+      this._detail.classList.remove("open");
+      this._markOpen();
+      setTimeout(() => { if (this._open < 0) this._dropDetail(); }, 260);
+      return;
+    }
+    const wasOpen = this._open >= 0;
+    this._open = i;
+    this._markOpen();
+    this._placeDetail();
+    const slot = this._detail.firstElementChild;
+    slot.innerHTML = "";
+    slot.appendChild(this._makeDetail(i));
+    if (wasOpen) this._detail.classList.add("open");
+    else requestAnimationFrame(() => requestAnimationFrame(() => this._detail.classList.add("open")));
+  }
+
+  _showPopup(i) {
+    this._open = i;
+    this._markOpen();
+    const body = this.shadowRoot.getElementById("dlg-body");
+    body.innerHTML = "";
+    body.appendChild(this._makeDetail(i));
+    this._dlg.querySelector(".nav").hidden = this._packCfgs.length < 2;
+    if (!this._dlg.open) this._dlg.showModal();
   }
 }
 
-// ─── Visual config editor (tabbed Basic / Advanced) ────────────────────────
-class BatteryPackCardEditor extends HTMLElement {
+const CSS = `
+  :host {
+    display: block;
+    --clr-green: #4caf50; --clr-amber: #ffc107; --clr-orange: #ff9800;
+    --clr-red: #ef5350; --clr-blue: #42a5f5; --clr-purple: #ab47bc; --clr-grey: #9e9e9e;
+  }
+  ha-card { display: block; padding: 18px 18px 14px; container-type: inline-size; }
+  [data-entity] { cursor: pointer; }
+  .s-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .s-hr { display: flex; align-items: center; gap: 4px; }
+  .s-title { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
+  .s-head .alarm { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 4px 12px; border-radius: 14px; white-space: nowrap; }
+  .s-head .alarm.ok    { color: var(--clr-green); background: rgba(76,175,80,0.13); }
+  .s-head .alarm.alert { color: var(--clr-red);   background: rgba(239,83,80,0.18); }
+  .s-head .alarm .dot  { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+  .empty { font-size: 13px; opacity: 0.7; padding: 8px 0; }
+  .empty.warn { opacity: 1; color: var(--clr-red); line-height: 1.4; }
+
+  /* The cabinet: at most --max-cols boxes per row, fewer once a box would
+     drop below --box-min (same rule as the cell grid). */
+  .cabinet {
+    --gap: 6px;
+    display: grid; gap: var(--gap);
+    grid-template-columns: repeat(auto-fit, minmax(
+      min(100%, max(var(--box-min, 130px), calc((100% - (var(--max-cols, 4) - 1) * var(--gap)) / var(--max-cols, 4) - 0.1px))), 1fr));
+    padding: 10px 14px; border-radius: 10px;
+    background:
+      repeating-linear-gradient(180deg, transparent 0 7px, rgba(255,255,255,0.05) 7px 8px) left / 6px 100% no-repeat,
+      repeating-linear-gradient(180deg, transparent 0 7px, rgba(255,255,255,0.05) 7px 8px) right / 6px 100% no-repeat,
+      linear-gradient(#141414, #101010);
+    border: 1px solid rgba(255,255,255,0.07);
+    box-shadow: inset 0 2px 10px rgba(0,0,0,0.6);
+  }
+  .cabinet:empty { display: none; }
+  .cabinet[hidden] { display: none; }   /* the grid display above would override [hidden] */
+  /* One column, as wide as box_min_width but never narrower than 220px; the
+     cabinet grows with it, so the packs stay inside it and centred. */
+  .cabinet.single { --gap: 3px; }
+
+  /* One pack: the front of its case. Sizes are in cqw so the whole face
+     scales with the box. */
+  .box {
+    all: unset; box-sizing: border-box; cursor: pointer; position: relative;
+    aspect-ratio: 4 / 3; container-type: inline-size; color: #fff;
+    font-family: inherit; border-radius: 5px;
+    background: linear-gradient(170deg, #2b2b2b 0%, #1d1d1d 45%, #171717 100%);
+    border: 1px solid rgba(255,255,255,0.09);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.10), inset 5px 0 0 rgba(0,0,0,0.25), 0 3px 6px rgba(0,0,0,0.5);
+    transition: filter 0.15s;
+  }
+  .box:hover { filter: brightness(1.18); }
+  .box:focus-visible { outline: 2px solid var(--clr-blue); outline-offset: 2px; }
+  .box.open { outline: 2px solid var(--primary-color, #03a9f4); outline-offset: 2px; }
+  .box.min { border: 2px solid var(--clr-red);   box-shadow: 0 0 12px rgba(239,83,80,0.4), inset 0 1px 0 rgba(255,255,255,0.1); }
+  .box.max { border: 2px solid var(--clr-green); box-shadow: 0 0 12px rgba(76,175,80,0.4), inset 0 1px 0 rgba(255,255,255,0.1); }
+
+  .term { position: absolute; top: 6%; width: 14%; aspect-ratio: 1; border-radius: 2px; display: grid; place-items: center; }
+  .term::after {
+    content: ""; width: 46%; aspect-ratio: 1; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #f2f2f2, #9a9a9a 60%, #5c5c5c);
+    box-shadow: 0 0 0 1.5px rgba(0,0,0,0.5);
+  }
+  .term.neg { left: 6%;  background: #0d0d0d; box-shadow: inset 0 0 0 1.5px #3a3a3a; }
+  .term.pos { right: 6%; background: linear-gradient(#ff8a2b, #e0650c); box-shadow: inset 0 0 0 1.5px rgba(0,0,0,0.25); }
+  .sign { position: absolute; top: 23%; font-size: 9cqw; font-weight: 700; opacity: 0.55; line-height: 1; }
+  .sign.neg { left: 10.5%; } .sign.pos { right: 10%; }
+  .breaker { position: absolute; left: 8%; top: 38%; width: 8%; height: 22%; border-radius: 2px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #333; }
+  .breaker::after { content: ""; position: absolute; left: 30%; right: 30%; top: 22%; height: 30%; background: #444; border-radius: 1px; }
+  .box.idle .breaker::after { top: 50%; }
+
+  /* The screen, tinted like a cell tile. */
+  .screen {
+    position: absolute; left: 23%; right: 23%; top: 9%; height: 52%;
+    border-radius: 3px; padding: 5% 6%; box-sizing: border-box;
+    --tint: rgba(76,175,80,0.24);
+    background: linear-gradient(var(--tint), var(--tint)), #0c0c0c;
+    border: 1.5px solid #050505;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), inset 0 8px 14px rgba(255,255,255,0.04);
+    display: flex; flex-direction: column; justify-content: space-evenly; text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .box.d-warn .screen { --tint: rgba(255,214,0,0.26); }
+  .box.d-bad  .screen { --tint: rgba(255,120,0,0.34); }
+  .box.alarm  .screen { --tint: rgba(239,60,60,0.42); }
+  .scr-big { font-size: 12.5cqw; font-weight: 700; line-height: 1; }
+  .scr-big small { font-size: 0.6em; margin-left: 1px; opacity: 0.7; }
+  .scr-bar { height: 5%; min-height: 3px; border-radius: 2px; background: rgba(0,0,0,0.45); overflow: hidden; }
+  .scr-bar i { display: block; height: 100%; width: var(--soc); background: var(--sc); }
+  .scr-line { font-size: 5.8cqw; line-height: 1.15; opacity: 0.85; white-space: nowrap; overflow: hidden; }
+  .scr-line .u { opacity: 0.55; }
+
+  .plabel {
+    position: absolute; right: 6%; top: 66%; max-width: 62%;
+    font-size: 7.5cqw; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+    color: rgba(255,255,255,0.8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .pfoot {
+    position: absolute; left: 6%; right: 6%; bottom: 7%;
+    display: flex; justify-content: space-between; align-items: flex-end;
+    font-size: 5.6cqw; letter-spacing: 0.04em; color: rgba(255,255,255,0.55);
+  }
+  .leds { display: flex; gap: 6cqw; align-items: center; }
+  .leds span { display: flex; align-items: center; gap: 1.8cqw; }
+  .leds i { width: 3.6cqw; aspect-ratio: 1; border-radius: 50%; background: #333; }
+  .leds .run.on { background: var(--clr-green); box-shadow: 0 0 5px var(--clr-green); }
+  .leds .alm.on { background: var(--clr-red); box-shadow: 0 0 6px var(--clr-red); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0.25; } }
+  .ports { display: flex; gap: 1.6cqw; }
+  .ports i { width: 6cqw; height: 4.4cqw; background: #0b0b0b; border: 1px solid #333; border-radius: 1px; }
+  .ports i.dry { background: #3d9a4a; border-color: #2c6e35; }
+  @container (max-width: 115px) { .scr-line, .ports { display: none; } }
+
+  /* The rack: the display bezel on top of the cabinet, both the same width.
+     In single stack it's as wide as one pack plus the cabinet's padding. */
+  #rack.single { max-width: calc(max(220px, var(--box-min, 130px)) + 30px); margin: 0 auto; }
+  .mounted { position: relative; padding: 9px 9px 10px; border-radius: 10px 10px 0 0; border: 1px solid rgba(255,255,255,0.08); border-bottom: 0;
+    background: linear-gradient(#262626, #1a1a1a); }
+  .mounted[hidden] { display: none; }
+  .mounted::before, .mounted::after { content: ""; position: absolute; top: 4px; width: 4px; height: 4px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #bbb, #555); }
+  .mounted::before { left: 4px; } .mounted::after { right: 4px; }
+  #rack.has-disp .cabinet { border-radius: 0 0 10px 10px; }
+  /* Display only (no packs): the bezel is the whole device */
+  #rack.no-packs .mounted { border-radius: 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+
+  /* Compact display: ring left, 2 × 2 figures right, scaling with the width */
+  .jk.compact { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: clamp(6px, 5cqw, 28px); row-gap: 4px; padding: 8px clamp(8px, 4cqw, 12px); }
+  .jk.compact .ring.sm { width: clamp(36px, 16cqw, 76px); height: clamp(36px, 16cqw, 76px); }
+  .jk.compact .ring.sm .arc { -webkit-mask: radial-gradient(farthest-side, transparent 72%, #000 73%);
+                                      mask: radial-gradient(farthest-side, transparent 72%, #000 73%); }
+  .jk.compact .ring.sm .pct { inset: 18%; font-size: clamp(9px, 4cqw, 17px); }
+  .jk.compact .grid4 { display: grid; grid-template-columns: auto auto; justify-content: space-between; align-items: baseline; gap: clamp(2px, 1.6cqw, 10px) clamp(6px, 3cqw, 24px); min-width: 0; }
+  .jk.compact .c { display: flex; align-items: baseline; gap: clamp(2px, 0.8cqw, 5px); min-width: 0; white-space: nowrap; }
+  .jk.compact .c .k { font-size: clamp(8px, 3.4cqw, 15px); }
+  .jk.compact .c .v { margin: 0; font-size: clamp(9.5px, 5.2cqw, 24px); overflow: hidden; text-overflow: ellipsis; }
+  .jk.compact .alarmline { grid-column: 1 / -1; font-size: clamp(11px, 3.4cqw, 14px); }
+
+  /* The display itself, after the JK BMS screen: black, white labels, light
+     green figures (sampled from the JK screen), the SOC ring. */
+  .jk {
+    container-type: inline-size; color: #fff; background: #070707; border-radius: 3px; padding: 12px 14px;
+    box-shadow: inset 0 0 0 2px #000, 0 0 0 1px rgba(255,255,255,0.06);
+    font-family: "Roboto Condensed", "Arial Narrow", var(--paper-font-body1_-_font-family, system-ui), sans-serif; font-stretch: condensed;
+  }
+  .jk .v { color: #84fa5c; font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 3px; }
+  .jk .v.red { color: #ff3b30; } .jk .v.amber { color: var(--clr-amber); }
+  .jk [data-entity] { cursor: pointer; }
+  .jk .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .jk .top > span { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 15px; }
+  .jk .top .v.big { font-size: 26px; line-height: 1; margin-left: 0; }
+  .jk .ico { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #84fa5c; color: #84fa5c; font-size: 11px; font-weight: 700; flex: none; }
+  .jk .mid { display: grid; grid-template-columns: auto 1fr 1fr; align-items: center; gap: 10px; margin: 10px 0 8px; }
+  .jk .ring { position: relative; width: 92px; height: 92px; }
+  .jk .ring .arc { position: absolute; inset: 0; border-radius: 50%;
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 15px), #000 calc(100% - 14.5px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 15px), #000 calc(100% - 14.5px)); }
+  .jk .ring .pct { position: absolute; inset: 15px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; font-weight: 700; background: #0c0c0c; box-shadow: 0 0 0 1px #2a2a2a; }
+  .jk .cap { text-align: center; }
+  .jk .cap .v { display: block; font-size: 34px; line-height: 1; margin: 0; }
+  .jk .cap .k { font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+  .jk .bot { display: grid; grid-template-columns: repeat(var(--cols, 4), auto); justify-content: space-between; gap: 4px 12px; font-size: 13px; white-space: nowrap; }
+  .jk .bot .col { display: flex; flex-direction: column; gap: 4px; }
+  .jk .bot .v { font-size: 15px; }
+  @container (max-width: 380px) {
+    .jk { padding: 10px 11px; }
+    .jk .top > span { font-size: 12px; gap: 4px; }
+    .jk .top .v.big { font-size: 20px; }
+    .jk .ico { width: 16px; height: 16px; font-size: 9px; }
+    .jk .mid { gap: 6px; margin: 8px 0 6px; }
+    .jk .ring { width: 74px; height: 74px; }
+    .jk .ring .pct { font-size: 16px; inset: 12px; }
+    .jk .ring .arc { -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 12px), #000 calc(100% - 11.5px));
+                             mask: radial-gradient(farthest-side, transparent calc(100% - 12px), #000 calc(100% - 11.5px)); }
+    .jk .cap .v { font-size: 27px; }
+    .jk .cap .k { font-size: 9px; }
+    .jk .bot { grid-template-columns: repeat(2, auto); font-size: 11.5px; gap: 6px 10px; }
+    .jk .bot .col { gap: 3px; }
+    .jk .bot .v { font-size: 13px; }
+  }
+
+  /* Inline detail: a full-width grid row under the tapped box's row. */
+  .bdetail {
+    order: 9999; grid-column: 1 / -1; display: grid; grid-template-rows: 0fr;
+    margin-top: calc(-1 * var(--gap)); transition: grid-template-rows 0.25s ease, margin 0.25s;
+  }
+  .bdetail.open { grid-template-rows: 1fr; margin-top: 0; }
+  .bdetail > div { overflow: hidden; min-height: 0; }
+  .bdetail battery-pack-card { display: block; margin: 4px 0; border: 1px solid var(--primary-color, #03a9f4); border-radius: var(--ha-card-border-radius, 12px); }
+  .cabinet.single .bdetail { width: min(560px, calc(100cqw - 36px)); justify-self: center; }
+
+  .legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 14px; font-size: 11px; opacity: 0.65; margin-top: 10px; }
+  .legend:empty { display: none; }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .sw.ok { background: rgba(76,175,80,0.55); }
+  .sw.d-warn { background: rgba(255,214,0,0.6); }
+  .sw.d-bad { background: rgba(255,120,0,0.75); }
+  .sw.alarm { background: rgba(239,60,60,0.85); }
+  .sw.min { border: 2px solid var(--clr-red); width: 7px; height: 7px; }
+  .sw.max { border: 2px solid var(--clr-green); width: 7px; height: 7px; }
+
+  dialog {
+    padding: 0; border: 0; border-radius: 14px; color: var(--primary-text-color);
+    background: var(--ha-card-background, var(--card-background-color, #1c1c1c));
+    width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 48px);
+    box-shadow: 0 12px 48px rgba(0,0,0,0.6);
+  }
+  dialog::backdrop { background: rgba(0,0,0,0.6); }
+  .dlg-bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px 0 12px; }
+  .dlg-bar button { all: unset; cursor: pointer; padding: 6px 10px; border-radius: 6px; font-size: 13px; color: var(--secondary-text-color); font-family: inherit; }
+  .dlg-bar button:hover { background: rgba(127,127,127,0.12); color: var(--primary-text-color); }
+  .dlg-bar button:focus-visible { outline: 2px solid var(--clr-blue); }
+  .nav { display: flex; gap: 4px; }
+  #dlg-body battery-pack-card { display: block; }
+`;
+
+// ─── Editor ───────────────────────────────────────────────────────────────
+// "Bank" tab for the stack's own options; one tab per pack, each holding the
+// regular battery-pack-card editor for that pack's config.
+
+const ENT = { entity: { domain: "sensor" } };
+const BANK_SCHEMA = [
+  { name: "name", selector: { text: {} } },
+  {
+    type: "grid", name: "", schema: [
+      { name: "layout", selector: { select: { mode: "dropdown", options: [
+        { value: "grid", label: "Cabinet grid" }, { value: "stack", label: "Single stack" }] } } },
+      { name: "detail", selector: { select: { mode: "dropdown", options: [
+        { value: "inline", label: "Under the pack" }, { value: "popup", label: "Popup" }] } } },
+      { name: "columns", selector: { number: { min: 1, max: 8, step: 1, mode: "box" } } },
+      { name: "box_min_width", selector: { number: { min: 90, max: 320, step: 5, mode: "box", unit_of_measurement: "px" } } },
+      { name: "highlight_soc", selector: { boolean: {} } },
+      { name: "show_legend", selector: { boolean: {} } },
+      { name: "show_bank_display", selector: { boolean: {} } },
+      { name: "capacity_unit", selector: { select: { mode: "dropdown", options: [{ value: "Ah", label: "Ah (charge)" }, { value: "kWh", label: "kWh (energy)" }] } } },
+      { name: "bank_display_size", selector: { select: { mode: "dropdown", options: [{ value: "full", label: "Full" }, { value: "compact", label: "Compact (one line)" }] } } },
+      { name: "power_unit", selector: { select: { mode: "dropdown", options: [{ value: "kW", label: "kW" }, { value: "W", label: "W" }, { value: "auto", label: "Auto (W below 1 kW)" }] } } },
+      { name: "nominal_voltage", selector: { number: { min: 1, max: 1000, step: 0.1, mode: "box", unit_of_measurement: "V" } } },
+      { name: "invert_current", selector: { boolean: {} } },
+      { name: "temp_include_mos", selector: { boolean: {} } },
+    ],
+  },
+];
+const LABELS = {
+  name: "Title",
+  layout: "Layout",
+  detail: "Pack details open",
+  columns: "Max packs per row",
+  box_min_width: "Min pack width",
+  highlight_soc: "Red / green border on lowest / highest SOC pack",
+  show_legend: "Show colour legend",
+  show_bank_display: "Show the bank display",
+  capacity_unit: "Capacity shown in",
+  bank_display_size: "Bank display",
+  power_unit: "Bank power shown in",
+  nominal_voltage: "Nominal voltage for kWh (blank = from the packs)",
+  invert_current: "Invert current and power, for all packs and the bank",
+  temp_include_mos: "Count the MOSFET in each pack's temperature and the temperature alert",
+  entity_capacity_total: "Bank total capacity",
+  entity_cell_max: "Highest cell voltage",
+  entity_cell_min: "Lowest cell voltage",
+  entity_temperature: "Temperature",
+  entity_alarm: "Alarm (on / non-zero / a warning text = alarm)",
+  entity_pack_count: "Number of packs",
+  entity_charge: "Charge switch (CHG)",
+  entity_discharge: "Discharge switch (DCH)",
+  entity_soc: "Bank SOC",
+  entity_voltage: "Bank voltage",
+  entity_current: "Bank current",
+  entity_power: "Bank power",
+  entity_capacity_remaining: "Bank remaining capacity",
+};
+
+class BatteryStackedPackCardEditor extends HTMLElement {
   constructor() {
     super();
-    this._tab = "basic";
-    this._advForms = [];
-    this._entRows = [];            // entity-or-template fields (see _entityRow)
-    this._tplForced = new Set();   // fields switched to template mode but still empty
+    this._tab = -1;   // -1 = Bank, -2 = Alerts, otherwise a pack index
+    this._totRows = [];            // bank totals: entity-or-template fields
+    this._tplForced = new Set();   // switched to template mode but still empty
     this._tplStash = {};           // templates set aside when switching back to an entity
   }
 
   setConfig(config) {
-    this._config = { ...config };
+    this._config = { ...config, packs: Array.isArray(config.packs) ? [...config.packs] : [] };
+    if (this._tab >= this._config.packs.length) this._tab = -1;
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
+    if (this._packEditor) this._packEditor.hass = hass;
     this._render();
   }
 
-  _dispatch(merged) {
-    this._config = merged;
-    const out = new Event("config-changed", { bubbles: true, composed: true });
-    out.detail = { config: merged };
-    this.dispatchEvent(out);
+  _dispatch(config) {
+    this._config = config;
+    const ev = new Event("config-changed", { bubbles: true, composed: true });
+    ev.detail = { config };
+    this.dispatchEvent(ev);
+  }
+
+  _setPacks(packs, tab) {
+    if (tab !== undefined) this._tab = tab;
+    this._dispatch({ ...this._config, packs });
+    this._render();
   }
 
   _render() {
     if (!this._hass || !this._config) return;
     if (!this._mounted) this._mount();
-    this._updateTabs();
-    this._updateActiveTab();
+    this._renderTabs();
+    const bank = this._tab === -1, alerts = this._tab === -2;
+    this._bankPane.hidden = !bank;
+    this._packPane.hidden = this._tab < 0;
+    this._alertsPane.hidden = !alerts;
+    if (alerts) {
+      this._packEditor = null;
+      this._packSlot.innerHTML = "";
+      this._packEditorFor = -1;
+      if (!customElements.get("battery-pack-card-alerts-editor")) {
+        this._alertsPane.textContent = "Alerts need battery-pack-card.js v2 or newer.";
+        return;
+      }
+      if (!this._alertsEd) {
+        this._alertsEd = document.createElement("battery-pack-card-alerts-editor");
+        this._alertsEd.addEventListener("alerts-changed", (e) => { e.stopPropagation(); this._dispatch({ ...this._config, alerts: e.detail.alerts }); });
+        this._alertsPane.appendChild(this._alertsEd);
+      }
+      // Headless pack cards, as the card itself uses, so the alerts cover the
+      // same entities; rebuilt when the packs change.
+      const Pack = customElements.get("battery-pack-card");
+      const cfgs = packConfigs({ ...DEFAULTS, ...this._config });
+      const sig = JSON.stringify(cfgs);
+      if (sig !== this._alertSrcSig) {
+        this._alertSrcSig = sig;
+        this._alertSrcs = cfgs.map((c) => Pack.summarySource(c, () => {}));
+      }
+      this._alertSrcs.forEach((src) => { src.hass = this._hass; });
+      this._alertsEd.inputs = () => this._alertSrcs.map((src) => src.alertInputs()).filter(Boolean);
+      this._alertsEd.config = this._config;
+      this._alertsEd.hass = this._hass;
+      return;
+    }
+    if (bank) {
+      this._packEditor = null;
+      this._packSlot.innerHTML = "";
+      this._packEditorFor = -1;
+      this._bankForm.hass = this._hass;
+      this._bankForm.schema = BANK_SCHEMA;
+      this._bankForm.data = { ...DEFAULTS, ...this._config };
+      this._updateTotalRows();
+      this._updateFound();
+      return;
+    }
+    const i = this._tab, packs = this._config.packs;
+    this._packPane.querySelector('[data-act="left"]').disabled = i === 0;
+    this._packPane.querySelector('[data-act="right"]').disabled = i === packs.length - 1;
+    // A fresh pack editor per pack: it keeps per-field UI state (template
+    // toggles) that must not carry over to the next pack.
+    if (this._packEditorFor !== i || !this._packEditor) {
+      this._packEditorFor = i;
+      this._packSlot.innerHTML = "";
+      if (!customElements.get("battery-pack-card-editor")) {
+        this._packSlot.textContent = "battery-pack-card.js is not loaded.";
+        return;
+      }
+      const ed = document.createElement("battery-pack-card-editor");
+      ed._noAlerts = true;   // the alerts are set for the whole stack
+      ed.addEventListener("config-changed", (e) => {
+        e.stopPropagation();   // a pack's config, not this card's
+        const next = [...this._config.packs];
+        next[this._packEditorFor] = e.detail.config;
+        this._dispatch({ ...this._config, packs: next });
+        this._renderTabs();
+      });
+      this._packEditor = ed;
+      this._packSlot.appendChild(ed);
+    }
+    this._packEditor.hass = this._hass;
+    this._packEditor.setConfig(packs[i] || {});
   }
 
   _mount() {
     this._mounted = true;
     this.innerHTML = `
       <style>
-        battery-pack-card-editor { display: block; }
-        .bpc-tabs {
-          display: flex; gap: 4px;
-          border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.12));
-          margin-bottom: 12px;
+        battery-stacked-pack-card-editor { display: block; }
+        .bspc-tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.12)); margin-bottom: 12px; }
+        .bspc-tab {
+          padding: 9px 14px; cursor: pointer; border: none; background: none; font: 500 14px/1.2 inherit;
+          color: var(--secondary-text-color); border-bottom: 2px solid transparent; font-family: inherit;
         }
-        .bpc-tab {
-          padding: 10px 18px; cursor: pointer; border: none; background: none;
-          color: var(--secondary-text-color);
-          font-size: 14px; font-weight: 500; letter-spacing: 0.3px;
-          border-bottom: 2px solid transparent; transition: all 0.15s;
-          font-family: inherit;
-        }
-        .bpc-tab:hover { color: var(--primary-text-color); }
-        .bpc-tab.active {
-          color: var(--primary-color);
-          border-bottom-color: var(--primary-color);
-        }
-        .bpc-pane { display: none; }
-        .bpc-pane.active { display: block; }
-        .bpc-section-title {
-          font-size: 12px; font-weight: 600; letter-spacing: 1.5px;
-          text-transform: uppercase;
-          color: var(--secondary-text-color);
-          margin: 16px 0 6px;
-          padding-bottom: 4px;
+        .bspc-tab:hover { color: var(--primary-text-color); }
+        .bspc-tab.active { color: var(--primary-color); border-bottom-color: var(--primary-color); }
+        .bspc-tab.add { color: var(--primary-color); }
+        .bspc-title {
+          font-size: 12px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase;
+          color: var(--secondary-text-color); margin: 18px 0 6px; padding-bottom: 4px;
           border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.08));
         }
-        .bpc-section-title:first-child { margin-top: 4px; }
-        .bpc-hint {
-          font-size: 12px; color: var(--secondary-text-color);
-          margin: 4px 0 12px; line-height: 1.4;
+        .bspc-hint { font-size: 12px; color: var(--secondary-text-color); margin: 4px 0 10px; line-height: 1.4; }
+        .bspc-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+        .bspc-tools button {
+          font: 500 13px/1 inherit; font-family: inherit; padding: 7px 10px; border-radius: 6px; cursor: pointer;
+          color: var(--primary-text-color); background: none; border: 1px solid var(--divider-color, rgba(0,0,0,0.15));
         }
-        .bpc-pane ha-form { display: block; }
-        .bpc-pane ha-form + ha-form { margin-top: 8px; }
-        .bpc-fields { display: grid; gap: 8px; }
-        .bpc-fields.two { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-        .bpc-ent { display: flex; align-items: center; gap: 6px; }
-        .bpc-ent ha-selector { flex: 1; min-width: 0; }
-        .bpc-tpl {
+        .bspc-tools button:disabled { opacity: 0.4; cursor: default; }
+        .bspc-tools button.danger { color: var(--error-color, #db4437); }
+        .bspc-form-totals { display: grid; gap: 8px; }
+        .bspc-ent { display: flex; align-items: center; gap: 6px; }
+        .bspc-ent ha-selector { flex: 1; min-width: 0; }
+        .bspc-tpl {
           flex: none; font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 7px;
           border-radius: 6px; cursor: pointer; color: var(--secondary-text-color); background: none;
           border: 1px solid var(--divider-color, rgba(0,0,0,0.15));
         }
-        .bpc-tpl:hover { color: var(--primary-text-color); }
-        .bpc-tpl.on { color: var(--primary-color); border-color: var(--primary-color); }
+        .bspc-tpl:hover { color: var(--primary-text-color); }
+        .bspc-tpl.on { color: var(--primary-color); border-color: var(--primary-color); }
       </style>
-      <div class="bpc-tabs">
-        <button type="button" class="bpc-tab" data-tab="basic">Basic</button>
-        <button type="button" class="bpc-tab" data-tab="advanced">Advanced</button>
-        ${this._noAlerts ? "" : `<button type="button" class="bpc-tab" data-tab="alerts">Alerts</button>`}
+      <div class="bspc-tabs"></div>
+      <div class="bspc-bank">
+        <div class="bspc-form-bank"></div>
+        <div class="bspc-found" hidden>
+          <div class="bspc-title">Packs found</div>
+          <div class="bspc-hint"></div>
+          <div class="bspc-tools"><button type="button" class="bspc-add-found"></button></div>
+        </div>
+        <div class="bspc-title">Bank totals</div>
+        <div class="bspc-hint">Optional, for the bank display on top of the cabinet. A field left empty is worked out from the packs where possible (voltage, current, SOC, power, remaining capacity). Use { } next to a field to enter a template instead of an entity, e.g. to add up several stacks.</div>
+        <div class="bspc-form-totals"></div>
+        <div class="bspc-extras">
+          <div class="bspc-title">More display values</div>
+          <div class="bspc-hint">For a card without packs, so the display can show these too. With packs they're worked out from the packs; set here they take priority.</div>
+          <div class="bspc-form-extras"></div>
+        </div>
       </div>
-      <div class="bpc-pane" id="bpc-basic"></div>
-      <div class="bpc-pane" id="bpc-advanced"></div>
-      <div class="bpc-pane" id="bpc-alerts"></div>
-    `;
+      <div class="bspc-alerts" hidden></div>
+      <div class="bspc-pack">
+        <div class="bspc-tools">
+          <button type="button" data-act="left">◀ Move</button>
+          <button type="button" data-act="right">Move ▶</button>
+          <button type="button" data-act="dup">Duplicate</button>
+          <button type="button" data-act="remove" class="danger">Remove</button>
+        </div>
+        <div class="bspc-pack-slot"></div>
+      </div>`;
+    this._tabs = this.querySelector(".bspc-tabs");
+    this._bankPane = this.querySelector(".bspc-bank");
+    this._packPane = this.querySelector(".bspc-pack");
+    this._packSlot = this.querySelector(".bspc-pack-slot");
+    this._alertsPane = this.querySelector(".bspc-alerts");
 
-    this.querySelectorAll(".bpc-tab").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        this._tab = btn.dataset.tab;
-        this._updateTabs();
-        this._updateActiveTab();
-      });
+    const form = (sel) => {
+      const f = document.createElement("ha-form");
+      f.computeLabel = (s) => LABELS[s.name] || s.name || "";
+      f.addEventListener("value-changed", (ev) => this._dispatch({ ...this._config, ...ev.detail.value }));
+      this.querySelector(sel).appendChild(f);
+      return f;
+    };
+    this._bankForm = form(".bspc-form-bank");
+    this.querySelector(".bspc-add-found").addEventListener("click", () => {
+      if (this._found && this._found.length) this._setPacks([...this._config.packs, ...this._found]);
     });
+    const totals = this.querySelector(".bspc-form-totals");
+    for (const [name] of TOTALS) totals.appendChild(this._totalRow(name));
+    const extras = this.querySelector(".bspc-form-extras");
+    extras.style.cssText = "display:grid;gap:8px";
+    for (const [name, domain] of EXTRAS) extras.appendChild(this._totalRow(name, domain === null ? { entity: {} } : { entity: { domain } }));
 
-    // Basic pane — single ha-form
-    this._basicPane = this.querySelector("#bpc-basic");
-    this._basicForm = document.createElement("ha-form");
-    this._basicForm.computeLabel = (s) => LABELS[s.name] || s.name || "";
-    this._basicForm.addEventListener("value-changed", (ev) => {
-      const next = { ...this._config, ...ev.detail.value };
-      // A BMS_BLE battery just picked: take over its cell count and name.
-      const dev = orNull(next.bms_ble_device);
-      if (dev && dev !== orNull(this._config.bms_ble_device)) {
-        next.cells = bleCellCount(this._hass, dev) || next.cells;
-        const b = bleDevices(this._hass).find((x) => x.id === dev);
-        if (b && (!next.name || next.name === "Battery")) next.name = b.name;
+    this._tabs.addEventListener("click", (e) => {
+      const t = e.target.closest(".bspc-tab");
+      if (!t) return;
+      if (t.dataset.tab === "add") {
+        const packs = this._config.packs;
+        // Start from the last pack: packs in one bank usually share their
+        // BMS, so only the name and prefix / entities need changing.
+        const base = packs.length ? { ...packs[packs.length - 1] } : {};
+        base.name = `Pack ${packs.length + 1}`;
+        return this._setPacks([...packs, base], packs.length);
       }
-      if (!dev) delete next.bms_ble_device;
-      // "JK-BMS add-on (default)" is no template at all.
-      if (next.template === "jkbms_addon") next.template = "";
-      // A prefix of a templated pack just picked: use its template, and take
-      // over its cell count.
-      const pfx = orNull(next.prefix);
-      if (pfx && pfx !== orNull(this._config.prefix) && !orNull(next.template) && !findPrefixes(this._hass).includes(pfx)) {
-        const key = Object.keys(TEMPLATES).find((k) => findTemplatePrefixes(this._hass, k).includes(pfx));
-        if (key) next.template = key;
-      }
-      const tk = orNull(next.template);
-      if (tk && TEMPLATES[tk] && pfx && (pfx !== orNull(this._config.prefix) || tk !== orNull(this._config.template))) {
-        next.cells = templateCellCount(this._hass, tk, pfx) || next.cells;
-      }
-      this._dispatch(next);
+      this._tab = Number(t.dataset.tab);
+      this._render();
     });
-    this._basicPane.appendChild(this._basicForm);
-
-    // Advanced pane — one heading + ha-form per section
-    this._advPane = this.querySelector("#bpc-advanced");
-    const hint = document.createElement("div");
-    hint.className = "bpc-hint";
-    hint.textContent =
-      "Override individual entity IDs. Any field left blank falls back to the prefix-derived default from the Basic tab. Use { } next to a field to enter a template instead of an entity.";
-    this._advPane.appendChild(hint);
-
-    this._advForms = [];
-    for (const section of ADVANCED_SECTIONS) {
-      this._appendAdvSection(section.title, section.schema, null, section.hint);
-    }
-    // Alerts pane: the shared alerts editor, fed by a headless copy of the
-    // card so it sees the same entities the card does.
-    this._alertsEd = document.createElement("battery-pack-card-alerts-editor");
-    this._alertsEd.addEventListener("alerts-changed", (ev) => this._dispatch({ ...this._config, alerts: ev.detail.alerts }));
-    this.querySelector("#bpc-alerts").appendChild(this._alertsEd);
-
-    // Placeholder; the per-cell sections are rebuilt whenever `cells` changes.
-    this._cellSlot = document.createElement("div");
-    this._advPane.appendChild(this._cellSlot);
-    this._cellForms = [];
-    this._lastCellsN = -1;
+    this._packPane.querySelector(".bspc-tools").addEventListener("click", (e) => {
+      const act = e.target.closest("button") && e.target.closest("button").dataset.act;
+      const i = this._tab, packs = [...this._config.packs];
+      if (!act || i < 0) return;
+      if (act === "left" && i > 0) { [packs[i - 1], packs[i]] = [packs[i], packs[i - 1]]; this._packEditorFor = -1; this._setPacks(packs, i - 1); }
+      if (act === "right" && i < packs.length - 1) { [packs[i + 1], packs[i]] = [packs[i], packs[i + 1]]; this._packEditorFor = -1; this._setPacks(packs, i + 1); }
+      if (act === "dup") { packs.splice(i + 1, 0, { ...packs[i], name: `${packs[i].name || `Pack ${i + 1}`} copy` }); this._setPacks(packs, i + 1); }
+      if (act === "remove") { packs.splice(i, 1); this._packEditorFor = -1; this._setPacks(packs, Math.min(i, packs.length - 1)); }
+    });
   }
 
-  _appendAdvSection(title, schema, parent, hint) {
-    parent = parent || this._advPane;
-    const h = document.createElement("div");
-    h.className = "bpc-section-title";
-    h.textContent = title;
-    parent.appendChild(h);
-    if (hint) {
-      const note = document.createElement("div");
-      note.className = "bpc-hint";
-      note.textContent = hint;
-      parent.appendChild(note);
-    }
-
-    // Sections made of entity fields get our own rows, so each field can
-    // carry an entity/template toggle next to it (ha-form has no room for one).
-    const flat = schema.flatMap((it) => (it.type === "grid" ? it.schema : [it]));
-    if (flat.length && flat.every((it) => it.selector && it.selector.entity)) {
-      const wrap = document.createElement("div");
-      wrap.className = `bpc-fields${schema.some((it) => it.type === "grid") ? " two" : ""}`;
-      flat.forEach((it) => wrap.appendChild(this._entityRow(it)));
-      parent.appendChild(wrap);
-      return wrap;
-    }
-
-    const f = document.createElement("ha-form");
-    f.schema = schema;
-    f.computeLabel = (s) => this._fieldLabel(s.name);
-    f.addEventListener("value-changed", (ev) => {
-      this._dispatch({ ...this._config, ...ev.detail.value });
-    });
-    parent.appendChild(f);
-    this._advForms.push(f);
-    return f;
-  }
-
-  _fieldLabel(name) {
-    if (LABELS[name]) return LABELS[name];
-    const m = /^entity_cell_(\d+)_(volt|ohm)$/.exec(name || "");
-    if (m) return `Cell #${m[1]} ${m[2] === "volt" ? "voltage" : "resistance"}`;
-    return name || "";
-  }
-
-  // An entity picker by default; "{ }" swaps it for HA's template editor
-  // (with its own entity autocomplete). The card renders either.
-  _entityRow(item) {
+  // Bank totals: an entity picker, or (after { }) a template editor, as in
+  // the pack card's editor.
+  _totalRow(name, entSel = ENT) {
     const row = document.createElement("div");
-    row.className = "bpc-ent";
+    row.className = "bspc-ent";
     const sel = document.createElement("ha-selector");
     // Not required: HA then shows its ✕ to clear the field, instead of
     // leaving YAML or the { } switch as the only way to empty it.
     sel.required = false;
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "bpc-tpl";
+    btn.className = "bspc-tpl";
     btn.textContent = "{ }";
     row.append(sel, btn);
-    const rec = { name: item.name, entitySelector: item.selector, sel, btn, mode: null };
-    sel.addEventListener("value-changed", (ev) => { ev.stopPropagation(); this._setField(item.name, ev.detail.value); });
-    btn.addEventListener("click", () => this._toggleTemplate(rec));
-    this._entRows.push(rec);
+    const rec = { name, sel, btn, mode: null, entSel };
+    sel.addEventListener("value-changed", (ev) => { ev.stopPropagation(); this._setField(name, ev.detail.value); });
+    btn.addEventListener("click", () => this._toggleTemplate(name));
+    this._totRows.push(rec);
     return row;
   }
 
@@ -2897,383 +1207,88 @@ class BatteryPackCardEditor extends HTMLElement {
     if (value === undefined || value === null || value === "") delete cfg[name];
     else cfg[name] = value;
     this._dispatch(cfg);
-    this._updateActiveTab();
+    this._updateTotalRows();
   }
 
-  _toggleTemplate(rec) {
-    const cur = this._config[rec.name];
-    if (this._isTemplateMode(rec.name)) {
+  _toggleTemplate(name) {
+    const cur = this._config[name];
+    if (this._isTemplateMode(name)) {
       // Back to an entity: a plain {{ states('x') }} becomes x again; anything
       // richer is set aside for this session in case the click was a mistake.
-      this._tplForced.delete(rec.name);
+      this._tplForced.delete(name);
       const m = typeof cur === "string" && /^\s*\{\{\s*states\(\s*['"]([\w.]+)['"]\s*\)\s*\}\}\s*$/.exec(cur);
-      if (cur && !m) this._tplStash[rec.name] = cur;
-      this._setField(rec.name, m ? m[1] : undefined);
+      if (cur && !m) this._tplStash[name] = cur;
+      this._setField(name, m ? m[1] : undefined);
     } else {
-      this._tplForced.add(rec.name);
-      const next = this._tplStash[rec.name] ||
-        (typeof cur === "string" && cur ? `{{ states('${cur}') }}` : undefined);
-      if (next !== undefined && next !== cur) this._setField(rec.name, next);
-      else this._updateActiveTab();
+      this._tplForced.add(name);
+      const next = this._tplStash[name] || (typeof cur === "string" && cur ? `{{ states('${cur}') }}` : undefined);
+      if (next !== undefined && next !== cur) this._setField(name, next);
+      else this._updateTotalRows();
     }
   }
 
-  _updateEntityRows() {
-    for (const r of this._entRows) {
+  _updateTotalRows() {
+    // The extra display values only matter without packs; keep them visible
+    // when one is set anyway, so it can still be cleared.
+    const ex = this.querySelector(".bspc-extras");
+    if (ex) ex.hidden = this._config.packs.length > 0 && !EXTRAS.some(([k]) => this._config[k]);
+    for (const r of this._totRows) {
       const tpl = this._isTemplateMode(r.name);
       r.sel.hass = this._hass;
       if (r.mode !== tpl) {   // only swap the inner selector when the mode flips
         r.mode = tpl;
-        r.sel.selector = tpl ? { template: {} } : r.entitySelector;
+        r.sel.selector = tpl ? { template: {} } : r.entSel;
         r.btn.classList.toggle("on", tpl);
         r.btn.setAttribute("aria-pressed", String(tpl));
         r.btn.title = tpl ? "Use an entity instead" : "Use a template instead of an entity";
       }
-      r.sel.label = this._fieldLabel(r.name);
+      r.sel.label = LABELS[r.name] || r.name;
       r.sel.value = this._config[r.name] ?? (tpl ? "" : undefined);
     }
   }
 
-  _rebuildCellSections(N) {
-    // Tear down whatever's there
-    this._entRows = this._entRows.filter((r) => !this._cellSlot.contains(r.sel));
-    this._cellSlot.innerHTML = "";
-    this._cellForms.forEach((f) => {
-      const idx = this._advForms.indexOf(f);
-      if (idx >= 0) this._advForms.splice(idx, 1);
-    });
-    this._cellForms = [];
-
-    const buildSchema = (suffix) => {
-      const fields = [];
-      for (let n = 1; n <= N; n++) {
-        fields.push({ name: `entity_cell_${n}_${suffix}`, selector: ENT_SENSOR });
-      }
-      // Two columns to keep the form compact.
-      return [{ type: "grid", name: "", schema: fields }];
-    };
-
-    const vForm = this._appendAdvSection(
-      `Per-cell voltages (1..${N})`,
-      buildSchema("volt"),
-      this._cellSlot,
-    );
-    const rForm = this._appendAdvSection(
-      `Per-cell internal resistances (1..${N})`,
-      buildSchema("ohm"),
-      this._cellSlot,
-    );
-    this._cellForms = [vForm, rForm];
+  // JK-BMS add-on packs and BMS_BLE batteries in this HA that aren't in the card yet, with a button
+  // to add them all (Multi-Pack names like pack_1_bms_1 included).
+  _updateFound() {
+    const box = this.querySelector(".bspc-found");
+    const Pack = customElements.get("battery-pack-card");
+    // An add-on pack by its prefix, a BMS_BLE battery by its device.
+    const key = (p) => p && (p.bms_ble_device ? `ble:${p.bms_ble_device}` : p.prefix);
+    const have = new Set(this._config.packs.map(key).filter(Boolean));
+    this._found = (Pack && Pack.findPacks ? Pack.findPacks(this._hass) : []).filter((f) => !have.has(key(f)));
+    box.hidden = !this._found.length;
+    if (!this._found.length) return;
+    box.querySelector(".bspc-hint").textContent =
+      `In Home Assistant but not in this card: ${this._found.map((f) => f.prefix || f.name).join(", ")}.`;
+    box.querySelector(".bspc-add-found").textContent = `+ Add ${this._found.length === 1 ? "this pack" : `these ${this._found.length} packs`}`;
   }
 
-  // The prefix field offers the add-on packs found in this HA; typing any
-  // other prefix keeps working.
-  _basicSchema() {
-    const schema = this._prefixSchema();
-    if (!bleDevices(this._hass).length && !orNull(this._config.bms_ble_device)) return schema;
-    if (this._bleSchemaFor !== schema) {
-      this._bleSchemaFor = schema;
-      const i = schema.findIndex((f) => f.name === "prefix") + 1;
-      this._bleSchema = [...schema.slice(0, i), { name: "bms_ble_device", selector: { device: { integration: BLE_PLATFORM } } }, ...schema.slice(i)];
-    }
-    return this._bleSchema;
-  }
-
-  // Prefixes of every templated integration's packs in this HA.
-  _templatePrefixes() {
-    return Object.keys(TEMPLATES).flatMap((key) => findTemplatePrefixes(this._hass, key));
-  }
-
-  _prefixSchema() {
-    const found = [...new Set([...findPrefixes(this._hass), ...this._templatePrefixes()])];
-    const cur = this._config.prefix;
-    if (!found.length) return BASIC_SCHEMA;
-    const options = [...new Set([...(cur ? [cur] : []), ...found])].map((p) => ({ value: p, label: found.includes(p) ? `${p} (${prefixName(p)})` : p }));
-    if (this._prefixSig !== options.map((o) => o.value).join()) {
-      this._prefixSig = options.map((o) => o.value).join();
-      this._schema = BASIC_SCHEMA.map((f) => (f.name === "prefix" ? { name: "prefix", selector: { select: { options, custom_value: true, mode: "dropdown" } } } : f));
-    }
-    return this._schema;
-  }
-
-  _updateTabs() {
-    this.querySelectorAll(".bpc-tab").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.tab === this._tab);
-    });
-    this.querySelectorAll(".bpc-pane").forEach((p) => {
-      p.classList.toggle("active", p.id === `bpc-${this._tab}`);
-    });
-  }
-
-  _updateActiveTab() {
-    if (this._tab === "alerts") {
-      if (!this._alertSrc) this._alertSrc = BatteryPackCard.summarySource({ type: "custom:battery-pack-card", ...this._config }, () => {});
-      if (this._alertSrcFor !== this._config) { this._alertSrcFor = this._config; this._alertSrc.setConfig({ ...this._config }); }
-      this._alertSrc.hass = this._hass;
-      this._alertsEd.inputs = () => [this._alertSrc.alertInputs()].filter(Boolean);
-      this._alertsEd.config = this._config;
-      this._alertsEd.hass = this._hass;
-    } else if (this._tab === "basic") {
-      this._basicForm.hass = this._hass;
-      this._basicForm.schema = this._basicSchema();
-      this._basicForm.data = { ...DEFAULTS, ...this._config, template: orNull(this._config.template) || "jkbms_addon" };
-    } else {
-      const N = Math.max(1, Math.min(512, parseInt(this._config.cells, 10) || 16));
-      if (N !== this._lastCellsN) {
-        this._rebuildCellSections(N);
-        this._lastCellsN = N;
-      }
-      for (const f of this._advForms) {
-        f.hass = this._hass;
-        f.data = this._config;
-      }
-      this._updateEntityRows();
-    }
+  _renderTabs() {
+    const packs = this._config.packs;
+    const html = [`<button type="button" class="bspc-tab${this._tab === -1 ? " active" : ""}" data-tab="-1">Bank</button>`,
+      `<button type="button" class="bspc-tab${this._tab === -2 ? " active" : ""}" data-tab="-2">Alerts</button>`]
+      .concat(packs.map((p, i) => `<button type="button" class="bspc-tab${this._tab === i ? " active" : ""}" data-tab="${i}">${esc((p && p.name) || `Pack ${i + 1}`)}</button>`))
+      .concat(`<button type="button" class="bspc-tab add" data-tab="add">+ Add pack</button>`)
+      .join("");
+    if (html !== this._tabsHtml) { this._tabsHtml = html; this._tabs.innerHTML = html; }
   }
 }
 
-// ─── Alerts editor ───────────────────────────────────────────────────────────
-// The Alerts tab of both cards' editors. Set `hass`, `config` (the whole card
-// config) and `inputs` (a function returning the packs' alertInputs); it
-// fires "alerts-changed" with the new `alerts` block. It never writes the
-// automations itself: the card does, once the dashboard is saved and shown.
-const ALERT_LABELS = {
-  enabled: "Alerts for this card", notify: "Notify", critical: "Alarms as critical notifications (phone app)",
-  cleared: "Send a message when it's back to normal", quiet: "Quiet hours for warnings (alarms always come through)",
-  quiet_from: "Quiet from", quiet_to: "Quiet until",
-  manual: "Let me edit it myself in Home Assistant",
-  warn_mv: "Warning from (mV)", alarm_mv: "Alarm from (mV)", minutes: "For at least (minutes)",
-  chemistry: "Cell chemistry", high_v: "Alarm above (V)", low_v: "Alarm below (V)",
-  warm: "Warning from (°)", hot: "Alarm from (°)", cold: "Warning below (°)",
-  warn_pct: "Warning at or below (%)", alarm_pct: "Alarm at or below (%)",
-};
-const ALERT_HINTS = {
-  delta: "The difference between the highest and the lowest cell.",
-  cell_voltage: "Any cell above or below what the chemistry allows.",
-  temperature: "The hottest and the coldest battery sensor, in Home Assistant's temperature unit.",
-  soc: "Off by default: a low SOC is often normal at night.",
-  bms_alarm: "When the BMS reports an alarm.",
-  switches: "When the BMS turns charging or discharging off.",
-};
-class BatteryPackCardAlertsEditor extends HTMLElement {
-  set hass(h) { this._hass = h; this._render(); }
-  set config(c) { this._config = c || {}; this._render(); }
-  set inputs(fn) { this._inputs = fn; this._render(); }
+customElements.define("battery-stacked-pack-card", BatteryStackedPackCard);
+customElements.define("battery-stacked-pack-card-editor", BatteryStackedPackCardEditor);
 
-  _alerts() { return alertsConfig(this._config && this._config.alerts); }
-
-  _emit(alerts) {
-    // The automations' ids come from the key: stored once, so renaming the
-    // card later doesn't leave the old automations behind.
-    if (!alerts.key) alerts = { key: alertKey(this._config || {}), ...alerts };
-    // Only what differs from the defaults, to keep the YAML short.
-    const out = {};
-    for (const [k, v] of Object.entries(alerts)) {
-      const def = ALERT_DEFAULTS[k];
-      if (ALERT_TYPES.some((t) => t.id === k)) {
-        const sub = {};
-        for (const [sk, sv] of Object.entries(v || {})) if (sv !== def[sk] && sv !== undefined && sv !== "") sub[sk] = sv;
-        if (Object.keys(sub).length) out[k] = sub;
-      } else if (k === "enabled" || k === "key" || k === "notify" || v !== def) out[k] = v;
-    }
-    alerts = out;
-    this._config = { ...this._config, alerts };
-    this.dispatchEvent(new CustomEvent("alerts-changed", { detail: { alerts }, bubbles: true, composed: true }));
-    this._render();
-  }
-
-  _notifyOptions() {
-    const svcs = Object.keys((this._hass && this._hass.services && this._hass.services.notify) || {})
-      .filter((n) => n !== "send_message" && n !== "persistent_notification").sort();
-    const opts = [{ value: "persistent_notification", label: "Notification in Home Assistant" },
-      ...svcs.map((n) => ({ value: `notify.${n}`, label: n.replace(/^mobile_app_/, "📱 ").replace(/_/g, " ") }))];
-    for (const t of this._alerts().notify) if (!opts.some((o) => o.value === t)) opts.push({ value: t, label: `${t} (not found)` });
-    return opts;
-  }
-
-  _bands() {
-    let p = null;
-    try { p = this._inputs && this._inputs()[0]; } catch (e) { p = null; }
-    return (p && p.bands) || { dw: 5, da: 15, tw: 35, th: 50, tc: 5 };
-  }
-
-  _schema(a) {
-    const box = (step, min, max) => ({ number: { mode: "box", step, ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}) } });
-    const base = [{ name: "enabled", selector: { boolean: {} } }];
-    if (!a.enabled) return base;
-    base.push(
-      { name: "notify", selector: { select: { multiple: true, mode: "list", options: this._notifyOptions() } } },
-      { name: "critical", selector: { boolean: {} } },
-      { name: "cleared", selector: { boolean: {} } },
-      { name: "quiet", selector: { boolean: {} } },
-    );
-    if (a.quiet) base.push({ type: "grid", name: "", schema: [{ name: "quiet_from", selector: { time: {} } }, { name: "quiet_to", selector: { time: {} } }] });
-    const fields = {
-      delta: [{ type: "grid", name: "", schema: [{ name: "warn_mv", selector: box(1, 0) }, { name: "alarm_mv", selector: box(1, 0) }, { name: "minutes", selector: box(1, 0, 120) }] }],
-      cell_voltage: [{ name: "chemistry", selector: { select: { mode: "dropdown", options: [{ value: "lfp", label: "LiFePO4 (LFP)" }, { value: "nmc", label: "Li-ion (NMC)" }, { value: "lto", label: "LTO" }] } } },
-        { type: "grid", name: "", schema: [{ name: "high_v", selector: box(0.01, 0) }, { name: "low_v", selector: box(0.01, 0) }] }],
-      temperature: [{ type: "grid", name: "", schema: [{ name: "warm", selector: box(1) }, { name: "hot", selector: box(1) }, { name: "cold", selector: box(1) }] }],
-      soc: [{ type: "grid", name: "", schema: [{ name: "warn_pct", selector: box(1, 0, 100) }, { name: "alarm_pct", selector: box(1, 0, 100) }] }],
-      bms_alarm: [], switches: [],
-    };
-    for (const t of ALERT_TYPES) {
-      const on = a[t.id].enabled;
-      base.push({
-        type: "expandable", name: t.id, title: `${on ? "●" : "○"} ${t.name}${on && a[t.id].manual ? " · your own" : ""}`,
-        schema: [{ name: "enabled", label: "Send this alert", selector: { boolean: {} } }, ...(on ? [...fields[t.id], { name: "manual", selector: { boolean: {} } }] : [])],
-      });
-    }
-    return base;
-  }
-
-  _helper(s) {
-    const b = this._bands(), a = this._alerts();
-    const ch = CHEMISTRY[a.cell_voltage.chemistry] || CHEMISTRY.lfp;
-    return {
-      warn_mv: `Blank = the card's Δ warning, ${b.dw} mV`, alarm_mv: `Blank = the card's Δ red, ${b.da} mV`,
-      high_v: `Blank = ${ch[0].toFixed(2)} V`, low_v: `Blank = ${ch[1].toFixed(2)} V`,
-      warm: `Blank = the card's amber, ${b.tw}°`, hot: `Blank = the card's red, ${b.th}°`, cold: `Blank = the card's blue, ${b.tc}°`,
-      manual: "The card makes it once and then leaves it to you.",
-      critical: "Breaks through silent mode on phones with the Home Assistant app.",
-    }[s.name];
-  }
-
-  _render() {
-    if (!this._hass || !this._config) return;
-    if (!this._form) {
-      this.innerHTML = `
-        <style>
-          battery-pack-card-alerts-editor { display: block; }
-          .bpa-status { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 9px 12px; border-radius: 8px; margin-bottom: 10px; background: rgba(127,127,127,0.1); }
-          .bpa-status.ok { background: rgba(76,175,80,0.12); } .bpa-status.warn { background: rgba(255,193,7,0.12); }
-          .bpa-status a { color: var(--primary-color); }
-          .bpa-hint { font-size: 12px; color: var(--secondary-text-color); margin: 4px 0 12px; line-height: 1.45; }
-          .bpa-types { font-size: 12px; color: var(--secondary-text-color); margin: 10px 0 0; line-height: 1.6; }
-          .bpa-types a { color: var(--primary-color); text-decoration: none; }
-          .bpa-remove { margin-top: 14px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--error-color, #db4437); color: var(--error-color, #db4437); background: none; cursor: pointer; font: inherit; font-size: 13px; }
-          .bpa-remove:disabled { opacity: 0.5; cursor: default; }
-        </style>
-        <div class="bpa-hint">Warnings and alarms from this card's packs, sent where you choose. The card makes one Home Assistant automation per alert and keeps it up to date: change a pack, an entity or a threshold here and the automation follows, as soon as the dashboard is saved and shown to an admin.</div>
-        <div class="bpa-status" hidden></div>
-        <ha-form></ha-form>
-        <div class="bpa-types" hidden></div>
-        <button type="button" class="bpa-remove" hidden>Remove all alerts of this card</button>`;
-      this._form = this.querySelector("ha-form");
-      this._form.computeLabel = (s) => s.label || ALERT_LABELS[s.name] || s.name;
-      this._form.computeHelper = (s) => this._helper(s);
-      this._form.addEventListener("value-changed", (ev) => {
-        ev.stopPropagation();
-        const v = ev.detail.value || {};
-        const out = { ...((this._config && this._config.alerts) || {}) };
-        for (const k of ["enabled", "notify", "critical", "cleared", "quiet", "quiet_from", "quiet_to"]) if (v[k] !== undefined) out[k] = v[k];
-        for (const t of ALERT_TYPES) if (v[t.id]) {
-          const clean = {};
-          for (const [k, x] of Object.entries(v[t.id])) if (x !== undefined && x !== "" && x !== null) clean[k] = x;
-          out[t.id] = clean;
-        }
-        this._emit(out);
-      });
-      this.querySelector(".bpa-remove").addEventListener("click", () => this._removeAll());
-    }
-    const a = this._alerts();
-    this._form.hass = this._hass;
-    this._form.schema = this._schema(a);
-    const data = { ...a };
-    for (const t of ALERT_TYPES) data[t.id] = { ...a[t.id] };
-    this._form.data = data;
-    this.querySelector(".bpa-remove").hidden = !(this._config.alerts && this._hass.user && this._hass.user.is_admin);
-    this._refreshStatus();
-  }
-
-  // What Home Assistant has now, against what the card would write.
-  _refreshStatus() {
-    const a = this._alerts();
-    const el = this.querySelector(".bpa-status"), types = this.querySelector(".bpa-types");
-    if (!a.enabled) { el.hidden = true; types.hidden = true; return; }
-    if (!a.notify.length) {
-      el.hidden = false; el.className = "bpa-status warn"; el.textContent = "Pick at least one place to notify.";
-      types.hidden = true; return;
-    }
-    let want = {};
-    try { want = buildAlerts(this._config, (this._inputs && this._inputs()) || []); } catch (e) { want = {}; }
-    const sig = JSON.stringify(Object.values(want).map((w) => w && w.variables.bpc_fingerprint)) + alertKey(this._config);
-    if (sig === this._statusSig) return;
-    this._statusSig = sig;
-    const key = alertKey(this._config);
-    const wanted = ALERT_TYPES.filter((t) => want[t.id]);
-    const skipped = ALERT_TYPES.filter((t) => a[t.id].enabled && !want[t.id]);
-    types.hidden = false;
-    types.innerHTML = wanted.map((t) => `${t.name}: <a href="/config/automation/edit/bpc_${key}_${t.id}" target="_blank" rel="noopener">open in Home Assistant ↗</a>`).join("<br>") +
-      (skipped.length ? `<br>Not made, the packs have nothing to watch for: ${skipped.map((t) => t.name).join(", ")}.` : "");
-    if (!this._hass.callApi || !this._hass.user || !this._hass.user.is_admin) { el.hidden = true; return; }
-    el.hidden = false; el.className = "bpa-status"; el.textContent = "Checking the automations…";
-    Promise.all(wanted.map((t) => this._hass.callApi("GET", `config/automation/config/bpc_${key}_${t.id}`).catch(() => null)))
-      .then((cur) => {
-        if (sig !== this._statusSig) return;
-        const stale = wanted.filter((t, i) => !a[t.id].manual && (!cur[i] || !cur[i].variables || cur[i].variables.bpc_fingerprint !== want[t.id].variables.bpc_fingerprint)).length;
-        el.className = `bpa-status ${stale ? "warn" : "ok"}`;
-        el.textContent = stale
-          ? `↻ ${stale} of ${wanted.length} automation${wanted.length > 1 ? "s" : ""} will be updated when you save.`
-          : `✓ ${wanted.length} automation${wanted.length > 1 ? "s" : ""} in Home Assistant, in sync.`;
-      });
-  }
-
-  async _removeAll() {
-    const key = alertKey(this._config);
-    if (!confirm("Remove all of this card's alert automations from Home Assistant, and switch its alerts off?")) return;
-    const btn = this.querySelector(".bpa-remove");
-    btn.disabled = true;
-    for (const t of ALERT_TYPES) {
-      const id = `bpc_${key}_${t.id}`;
-      const cur = await this._hass.callApi("GET", `config/automation/config/${id}`).catch(() => null);
-      if (cur && cur.variables && cur.variables.bpc_card === key) await this._hass.callApi("DELETE", `config/automation/config/${id}`).catch(() => null);
-    }
-    btn.disabled = false;
-    this._statusSig = null;
-    this._emit({ ...((this._config && this._config.alerts) || {}), enabled: false });
-  }
-}
-
-// Another copy may already be registered (a second resource, or one bundled
-// with an integration). The first copy wins; defining twice would throw and
-// stop this file before it loads the stacked card.
-if (!customElements.get("battery-pack-card")) {
-  customElements.define("battery-pack-card", BatteryPackCard);
-  customElements.define("battery-pack-card-editor", BatteryPackCardEditor);
-  customElements.define("battery-pack-card-alerts-editor", BatteryPackCardAlertsEditor);
-
-  window.customCards = window.customCards || [];
-  window.customCards.push({
-    type: "battery-pack-card",
-    name: "Battery Pack Card",
-    description: "Visual battery card: SOC silhouette, cell array, status pills.",
-    preview: false,
-    documentationURL: "https://github.com/SvenHamers/battery-pack-card",
-  });
-} else if (customElements.get("battery-pack-card") !== BatteryPackCard) {
-  console.warn(`BATTERY-PACK-CARD v${VERSION}: another copy of battery-pack-card was registered first and is the one in use. Remove the extra dashboard resource so only one copy loads.`);
-}
-
-// The stacked card ships as battery-stacked-pack-card.js next to this file.
-// HACS downloads it too but registers only this file as a dashboard resource,
-// so it is loaded from here, with this file's query string (HACS's ?hacstag=)
-// so the browser cache never pairs a new pack card with an old stack card.
-(() => {
-  if (customElements.get("battery-stacked-pack-card")) return;
-  const own = (document.currentScript && document.currentScript.src) ||
-    (/(https?:\/\/[^\s)]+?battery-pack-card\.js[^\s):]*)/.exec(new Error().stack || "") || [])[1] ||
-    ([...document.querySelectorAll("script[src]")].find((el) => /battery-pack-card\.js/.test(el.src)) || {}).src;
-  if (!own) return;
-  const url = new URL("battery-stacked-pack-card.js", own);
-  url.search = new URL(own).search;
-  import(url.href).catch(() => console.info(
-    "%c BATTERY-PACK-CARD %c battery-stacked-pack-card.js not found next to battery-pack-card.js; the stacked card is unavailable.",
-    "color:#fff;background:#3949ab;border-radius:3px", "color:inherit",
-  ));
-})();
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: "battery-stacked-pack-card",
+  name: "Battery Stacked Pack Card",
+  description: "Many battery packs drawn as stacked cases; tap one for its full Battery Pack Card.",
+  preview: false,
+  documentationURL: "https://github.com/SvenHamers/battery-pack-card#battery-stacked-pack-card",
+});
 
 console.info(
-  `%c BATTERY-PACK-CARD %c v${VERSION} `,
-  "color:#fff;background:#4caf50;font-weight:700;padding:2px 6px;border-radius:3px 0 0 3px;",
+  `%c BATTERY-STACKED-PACK-CARD %c v${VERSION} `,
+  "color:#fff;background:#e0650c;font-weight:700;padding:2px 6px;border-radius:3px 0 0 3px;",
   "color:#fff;background:#555;padding:2px 6px;border-radius:0 3px 3px 0;"
 );
+})();
