@@ -65,10 +65,11 @@ The cell count is read from the `cell count real` sensor, so an 8S pack on a 16-
 | Cell summary | `cell average voltage`, `cell voltage min/max`, `cell delta voltage`, `cell voltage min/max cell number` |
 | Cells | `cell voltage 01…` / `cell resistance 01…` |
 | Pills | `status charging`, `status discharging`, `status balancing`, `status heating` (Heater) |
+| Charge phase | `bms charging status` (text sensor), shown as the PHASE tile |
 | Alarm | `bms errors` (text) and `battery total alarms active` (count) |
 | Temperatures | MOS = `temperature powertube`, probes 1–4 = `temperature sensor 1–4` |
 
-Not in the ESPHome example, so not shown unless you set an `entity_*` override: charge phase, DRY1/DRY2, ambient temperature, balancer-enabled. Check the sign of `battery current`: if charging shows as discharging, set `invert_current: true`.
+Not in the ESPHome example, so not shown unless you set an `entity_*` override: DRY1/DRY2, ambient temperature, balancer-enabled. Check the sign of `battery current`: if charging shows as discharging, set `invert_current: true`.
 
 ## Install
 
