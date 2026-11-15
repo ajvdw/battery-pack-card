@@ -128,6 +128,7 @@ const TEMPLATES = {
       vDelta:   ["sensor", "cell_delta_voltage"],
       minCell:  ["sensor", "cell_voltage_min_cell_number"],
       maxCell:  ["sensor", "cell_voltage_max_cell_number"],
+      phase:    ["sensor", "bms_charging_status"],         // text sensor
       alarmS:   ["sensor", "bms_errors"],                  // text sensor
       alarmN:   ["sensor", "battery_total_alarms_active"], // a count, not on/off
       chg:      ["binary_sensor", "status_charging"],
